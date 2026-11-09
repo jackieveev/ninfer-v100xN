@@ -463,7 +463,7 @@ int verify_loaded_product(const ninfer::Engine& engine) {
     const ninfer::LoadSummary load = engine.load_summary();
     if ((load.target != "qwen3_6_27b" && load.target != "qwen3_8_27b") ||
         (load.weights_id != "groupwise-int" && load.weights_id != "nvfp4" &&
-         load.weights_id != "quasar-nvfp4") ||
+         load.weights_id != "nvfp4-full") ||
         load.host_to_device_bytes == 0 || load.artifact_bytes_read == 0) {
         std::cerr << "Engine construction has an invalid load summary: target=" << load.target
                   << " weights=" << load.weights_id << '\n';

@@ -5,7 +5,7 @@ These startup-fixed experimental routes are separate from the recommended comple
 ## Native RAM-KV: larger windows and short inputs
 
 Measured on the local two V100-SXM2-16GB cards, CUDA 12.8 / SM70, PCIe P2P without NVLink,
-using `qwen3.8-27b/quasar-nvfp4`, INT8 group-64 KV, optimized-head greedy MTP3 and a 1024-token
+using `qwen3.8-27b/nvfp4-full`, INT8 group-64 KV, optimized-head greedy MTP3 and a 1024-token
 prefill chunk. RAM-KV is approximate Q/K mean-vector retrieval, including during long prefill;
 the ordinary route retains the complete history.
 
@@ -60,7 +60,7 @@ for the approximate semantics and separate archive/process budgets.
 
 Measured on 2026-10-07 on the local two V100-SXM2-16GB cards, CUDA 12.8 / SM70,
 PCIe 3.0 x16 PHB, qualified PCIe P2P and no NVLink. The artifact is
-`qwen3.8-27b/quasar-nvfp4`, at
+`qwen3.8-27b/nvfp4-full`, at
 `/Models/ninfer-V100X2/quasar-v3/qwen3_8_27b_nvfp4.ninfer`. This is a startup-fixed
 alternative to TP2, not an automatic long-input switch or PP-prefill/TP-decode hybrid.
 

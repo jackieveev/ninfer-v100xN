@@ -115,10 +115,11 @@ measurements of this target. The supported identities are
 `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`, `qwen3.8-27b/groupwise-int`,
 `qwen3.8-27b/nvfp4`, `qwen3.8-27b/fp8`, `qwen3.8-27b/gguf-q4-k-m`, and
 `qwen3.6-35b-a3b/groupwise-int`.
-The explicitly requested QUASAR trial adds `qwen3.8-27b/quasar-nvfp4`, currently restricted to
+The explicitly requested QUASAR trial adds `qwen3.8-27b/nvfp4-full`, currently restricted to
 SM70 TP2 Text/None/MTP/DFlash, TP2 image/video Vision with None/MTP, experimental TP4
 Text/None/MTP, and experimental PP2 Text/None/MTP. Vision excludes DFlash, PP2 and the fast-decode numerical profile. Vision admits the default-off
-long-attention profile on TP2 with complete INT8 group-64 KV. It registers the published QUASAR v3 container identity, preserves its
+long-attention profile on TP2 with complete INT8 group-64 KV. It registers every qwen3.8-27b v3 container whose complete
+Text inventory is full NVFP4 with W8 vocabulary endpoints (QUASAR and derived fine-tunes), classified structurally, preserves its
 256 NVFP4 parents and FP32 activation divisors, and keeps its W8 vocabulary/MTP and BF16 GDN
 controls and optional W8/BF16 DFlash2 package. The 27B draft window remains at most seven.
 This artifact's QAT/conversion quality is not established by inference smoke tests.

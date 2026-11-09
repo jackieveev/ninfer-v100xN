@@ -124,7 +124,7 @@ int exercise(int argc, char** argv) {
         options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
     }
     ninfer::Engine engine(options);
-    require(engine.load_summary().weights_id == "quasar-nvfp4", "gate requires the QUASAR artifact");
+    require(engine.load_summary().weights_id == "nvfp4-full", "gate requires the QUASAR artifact");
     Tokens context = read_corpus(argv[3]);
     const auto continuation_report = read_json(argv[4]);
     const Tokens continuation = continuation_report["tests"][0]["reps"][0]["generation"]["token_ids"].get<Tokens>();

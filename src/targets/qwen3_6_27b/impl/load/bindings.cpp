@@ -45,7 +45,7 @@ NumericFormat endpoint_format(WeightsProfile weights_profile) {
         return NumericFormat::Q6G64_F16S;
     case WeightsProfile::Qwen38GroupwiseInt:
     case WeightsProfile::Qwen36Nvfp4:
-    case WeightsProfile::Qwen38QuasarNvfp4:
+    case WeightsProfile::Qwen38FullNvfp4:
         return NumericFormat::W8G32_F16S;
     case WeightsProfile::Qwen38Nvfp4:
         return NumericFormat::FP8_E4M3FN_ROW_BF16S;
@@ -934,35 +934,35 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     if (tp != 1 && tp != 2 && tp != 4) {
         throw std::invalid_argument("qwen3_6_27b: tp must be 1, 2 or 4");
     }
-    if (tp == 4 && weights_profile != WeightsProfile::Qwen38QuasarNvfp4 &&
+    if (tp == 4 && weights_profile != WeightsProfile::Qwen38FullNvfp4 &&
         weights_profile != WeightsProfile::Qwen38Nvfp4 &&
         weights_profile != WeightsProfile::Qwen38Fp8) {
-        throw std::invalid_argument("TP4 requires Qwen3.8-27B NVFP4, QUASAR NVFP4 or native FP8");
+        throw std::invalid_argument("TP4 requires Qwen3.8-27B NVFP4, full NVFP4 or native FP8");
     }
     if (features.vision && features.dflash()) {
         throw std::invalid_argument("DFlash does not support Vision");
     }
     const bool native_fp8 = weights_profile == WeightsProfile::Qwen38Fp8;
-    const bool quasar = weights_profile == WeightsProfile::Qwen38QuasarNvfp4;
+    const bool full_nvfp4 = weights_profile == WeightsProfile::Qwen38FullNvfp4;
     if (pp != 1 && (pp != 2 || tp != 1 || features.vision || features.dflash() ||
-                    (weights_profile != WeightsProfile::Qwen38Nvfp4 && !quasar))) {
-        throw std::invalid_argument("PP2 currently supports Qwen3.8 NVFP4/QUASAR Text/None/MTP only");
+                    (weights_profile != WeightsProfile::Qwen38Nvfp4 && !full_nvfp4))) {
+        throw std::invalid_argument("PP2 currently supports Qwen3.8 NVFP4/full-NVFP4 Text/None/MTP only");
     }
-    if (quasar && (tp != 2 && tp != 4 && pp != 2)) {
-        throw std::invalid_argument("QUASAR requires TP2, text-only TP4 or text-only PP2 (DFlash is TP2 only)");
+    if (full_nvfp4 && (tp != 2 && tp != 4 && pp != 2)) {
+        throw std::invalid_argument("full NVFP4 requires TP2, text-only TP4 or text-only PP2 (DFlash is TP2 only)");
     }
     if (tp == 4 && features.vision) {
         throw std::invalid_argument("qwen3_6_27b: TP4 does not support Vision");
     }
-    if (features.volta_fast_decode && (!quasar || (tp != 2 && tp != 4) || pp != 1 ||
+    if (features.volta_fast_decode && (!full_nvfp4 || (tp != 2 && tp != 4) || pp != 1 ||
                                        features.vision || features.dflash())) {
-        throw std::invalid_argument("volta_fast_decode requires QUASAR SM70 TP2/TP4 Text/None/MTP");
+        throw std::invalid_argument("volta_fast_decode requires full-NVFP4 SM70 TP2/TP4 Text/None/MTP");
     }
     if (native_fp8 && (tp != 4 || features.vision || features.dflash())) {
         throw std::invalid_argument("qwen3.8-27b/fp8 supports TP4 Text/MTP only");
     }
 #ifndef NINFER_VOLTA_BUILD
-    if (quasar) { throw std::invalid_argument("QUASAR currently requires SM70"); }
+    if (full_nvfp4) { throw std::invalid_argument("full NVFP4 currently requires SM70"); }
     if (tp == 4 || native_fp8) { throw std::invalid_argument("27B TP4 currently requires SM70"); }
 #endif
     if (tp == 4 && features.dflash()) {
@@ -1033,7 +1033,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     case WeightsProfile::Qwen38Nvfp4:
         bind_qwen38_fused_text_layers(binder, out, NumericFormat::FP8_E4M3FN_ROW_BF16S);
         break;
-    case WeightsProfile::Qwen38QuasarNvfp4:
+    case WeightsProfile::Qwen38FullNvfp4:
         bind_qwen38_fused_text_layers(binder, out, NumericFormat::NVFP4);
         break;
     case WeightsProfile::Qwen38Fp8:
@@ -1093,7 +1093,7 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
         throw std::invalid_argument("qwen3.8-27b: --spec dflash requires the DFlash2 package in the artifact");
     }
     if (has_dflash2) {
-        out.dflash.projection_format = (weights_profile == WeightsProfile::Qwen38Nvfp4 || quasar)
+        out.dflash.projection_format = (weights_profile == WeightsProfile::Qwen38Nvfp4 || full_nvfp4)
                                             ? NumericFormat::W8G32_F16S : NumericFormat::BF16;
         const artifact::TensorPlacement dflash_placement =
             features.dflash() ? artifact::TensorPlacement::Device

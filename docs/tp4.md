@@ -210,7 +210,7 @@ Four Tesla V100-SXM2 16 GB cards, all-pairwise NV2, CUDA 12.8 / SM70. The existi
 **220 W per-card power limit and 1200 MHz SM ceiling were retained; no power or clock
 setting was changed**. The existing `gpu-guard.service` drop-in sets `PL=220` and
 `MAXCLK=1200`; its launcher applies that graphics-clock ceiling.
-The published QUASAR NVFP4 v3 artifact is registered as `qwen3.8-27b/quasar-nvfp4`.
+The published QUASAR NVFP4 v3 artifact is registered as `qwen3.8-27b/nvfp4-full`.
 Deployment files are under `~/Ninfer` on the four-card host.
 
 The public `ninfer_bench` Engine route uses 180000 context capacity (180032 allocated),

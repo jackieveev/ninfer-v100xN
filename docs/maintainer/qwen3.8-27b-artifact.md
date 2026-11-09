@@ -1,7 +1,7 @@
 # Qwen3.8-27B artifact reference
 
 This reference defines the registered Qwen3.8-27B `.ninfer` storage contracts: the
-`qwen3.8-27b/nvfp4`, experimental `qwen3.8-27b/quasar-nvfp4`, native `qwen3.8-27b/fp8`
+`qwen3.8-27b/nvfp4`, experimental `qwen3.8-27b/nvfp4-full`, native `qwen3.8-27b/fp8`
 and preserved `qwen3.8-27b/gguf-q4-k-m` identities, their object inventories,
 shapes, numeric formats, storage layouts, fused row order, aliases, fixed sources, and
 source-to-object transforms. The existing registered `qwen3.8-27b/groupwise-int` contract remains
@@ -129,15 +129,22 @@ are DFlash and Vision. Ordinary/MTP startup does not materialize the DFlash weig
 payload/startup test independently compares every projected object against its complete source
 file range; W8 and BF16 Ops retain their independent mathematical oracle qualification.
 
-### 1.3 QUASAR trial artifact
+### 1.3 Full-NVFP4 v3 artifacts (QUASAR and derived checkpoints)
 
-The experimental identity `qwen3.8-27b/quasar-nvfp4` registers the single-file v3 release
+The experimental identity `qwen3.8-27b/nvfp4-full` registers every single-file `qwen3.8-27b`
+v3 container whose complete Text inventory is full NVFP4: all 256 fused attention/GDN/MLP
+projections NVFP4 with paired FP32 activation divisors, and W8 token embedding/output head.
+The v3 directory lacks a weights-profile field, so the reader classifies the complete projected
+inventory, not the filename, container ID or a representative tensor. Any other inventory is
+offered to the official mixed FP8/NVFP4 binding, which validates every tensor's exact format;
+an inventory matching neither profile is rejected by the binder. Fine-tuned, abliterated or
+otherwise re-quantized checkpoints with the same storage profile therefore execute the same
+leaves as QUASAR; their model quality and MTP acceptance are properties of each checkpoint.
+
+The reference instance is the release
 from [MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4-NInfer](https://huggingface.co/MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4-NInfer),
-revision `d03d4f4f7bdc4efa6df63a2fa3d9becceeb9ae2c` (tag `v3`). Its container ID is
-`39be2299c2b94512abd51ffe079830f2`. The v3 directory lacks a weights-profile field, so the
-reader selects this registered identity by container ID, not filename, object count, or a
-representative tensor's format. The target binder then validates the complete storage profile.
-Other v3 artifacts retain the existing official mixed-profile contract.
+revision `d03d4f4f7bdc4efa6df63a2fa3d9becceeb9ae2c` (tag `v3`), container ID
+`39be2299c2b94512abd51ffe079830f2`.
 
 The file is 19,782,432,752 bytes, with 1,328 tensors and the same six frontend resources. All
 64 Text layers use NVFP4 attention/GDN input/output and MLP projections: 256 fused parents

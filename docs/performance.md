@@ -1253,7 +1253,7 @@ Further QUASAR candidates and their external sources are in the
 ## QUASAR v3: final long-context decode evaluation
 
 Measured on 2026-10-13 on two V100-SXM2-16GB cards, CUDA 12.8 / SM70, qualified
-PCIe P2P without NVLink. The artifact is `qwen3.8-27b/quasar-nvfp4`; the code input
+PCIe P2P without NVLink. The artifact is `qwen3.8-27b/nvfp4-full`; the code input
 is the saved `profiles/bench/v100-code-85000-iommu-pt.ids`. Both routes use 85000
 actual input tokens, 180000 capacity (180032 allocated), complete INT8 group-64 KV,
 chunk 2560, greedy optimized-head MTP4 and CUDA Graphs. Each has two measured cold
@@ -1395,7 +1395,7 @@ operator and full-vocabulary comparisons above retain their completed evidence.
 
 ## QUASAR v3: Volta QPN projections
 
-The separate `qwen3.8-27b/quasar-nvfp4` trial uses the published QUASAR NInfer v3 artifact
+The separate `qwen3.8-27b/nvfp4-full` trial uses the published QUASAR NInfer v3 artifact
 on this two-card PCIe-P2P host, without NVLink. QUASAR is QAT, not mathematically lossless
 compression. Its stored NVFP4 codes/scales and FP32 activation divisors remain unchanged;
 this does not establish BF16-equivalent artifact quality. The profile is text-only and loads

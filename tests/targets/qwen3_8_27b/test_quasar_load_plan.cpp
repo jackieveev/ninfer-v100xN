@@ -56,14 +56,14 @@ void verify(const char* path) {
 
     Reader reader(path);
     require(reader.identity().model_id == "qwen3.8-27b" &&
-                reader.identity().weights_id == "quasar-nvfp4", "QUASAR identity was not retained");
+                reader.identity().weights_id == "nvfp4-full", "QUASAR identity was not retained");
     require(reader.objects().size() == 1334, "QUASAR projected inventory is incomplete");
     for (const int tp : {2, 4}) {
         for (const auto backend : {ninfer::SpeculativeBackend::None, ninfer::SpeculativeBackend::Mtp,
                                    ninfer::SpeculativeBackend::DFlash}) {
             if (tp == 4 && backend == ninfer::SpeculativeBackend::DFlash) { continue; }
             Binder binder(reader, tp);
-            const auto plan = bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+            const auto plan = bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
                 {.speculative = backend,
                  .proposal_head = backend == ninfer::SpeculativeBackend::Mtp
                      ? ninfer::ProposalHead::Optimized : ninfer::ProposalHead::Full}, tp);
@@ -141,7 +141,7 @@ void verify(const char* path) {
         Binder binder(reader, 4);
         bool rejected = false;
         try {
-            (void)bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+            (void)bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
                 {.vision = mode == 0, .volta_fast_decode = false,
                  .speculative = mode == 1 ? ninfer::SpeculativeBackend::DFlash
                                           : ninfer::SpeculativeBackend::Mtp}, 4);
@@ -150,7 +150,7 @@ void verify(const char* path) {
     }
     {
         Binder binder(reader, 4);
-        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
             {.volta_fast_decode = true, .speculative = ninfer::SpeculativeBackend::Mtp}, 4);
         require(plan.bindings.features.volta_fast_decode,
                 "TP4 experimental fast-decode profile was not selected");
@@ -158,7 +158,7 @@ void verify(const char* path) {
     for (const auto device : {ninfer::VisionDevice::Gpu, ninfer::VisionDevice::Cpu}) {
     for (const auto backend : {ninfer::SpeculativeBackend::None, ninfer::SpeculativeBackend::Mtp}) {
         Binder binder(reader, 2);
-        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
             {.vision = true, .vision_device = device, .speculative = backend}, 2);
         int vision_objects = 0;
         int host_vision_objects = 0;
@@ -179,7 +179,7 @@ void verify(const char* path) {
     }
     {
         Binder binder(reader, 2);
-        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+        const auto plan = bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
             {.volta_fast_decode = true, .speculative = ninfer::SpeculativeBackend::Mtp}, 2);
         require(plan.bindings.features.volta_fast_decode, "experimental profile was not selected");
     }
@@ -187,7 +187,7 @@ void verify(const char* path) {
         Binder binder(reader, 2);
         bool rejected = false;
         try {
-            (void)bind_artifact(binder, WeightsProfile::Qwen38QuasarNvfp4,
+            (void)bind_artifact(binder, WeightsProfile::Qwen38FullNvfp4,
                 {.vision = true, .volta_fast_decode = mode == 0,
                  .speculative = mode == 1 ? ninfer::SpeculativeBackend::DFlash
                                           : ninfer::SpeculativeBackend::Mtp},

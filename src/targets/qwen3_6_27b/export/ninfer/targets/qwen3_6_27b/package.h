@@ -35,7 +35,7 @@ enum class WeightsProfile : std::uint8_t {
     Qwen38GroupwiseInt,
     Qwen36Nvfp4,
     Qwen38Nvfp4,
-    Qwen38QuasarNvfp4,
+    Qwen38FullNvfp4,
     Qwen38Fp8,
     Qwen38GgmlK,
 };

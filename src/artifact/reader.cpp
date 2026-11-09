@@ -300,14 +300,6 @@ public:
     Qwen38Nvfp4V3Adapter(const Json& directory, const MappedFile& file,
                          std::uint64_t payload_start)
         : directory_(directory), file_(file), payload_start_(payload_start) {
-        // v3 has no weights-profile field. Register this published QUASAR artifact by its
-        // container identity, never by its filename or a representative tensor's format.
-        constexpr std::array<std::byte, 16> quasar_id = {
-            std::byte{0x39}, std::byte{0xbe}, std::byte{0x22}, std::byte{0x99},
-            std::byte{0xc2}, std::byte{0xb9}, std::byte{0x45}, std::byte{0x12},
-            std::byte{0xab}, std::byte{0xd5}, std::byte{0x1f}, std::byte{0xfe},
-            std::byte{0x07}, std::byte{0x98}, std::byte{0x30}, std::byte{0xf2}};
-        quasar_ = std::equal(quasar_id.begin(), quasar_id.end(), file_.data() + 16);
         if (!directory_.is_object() || !directory_.contains("metadata") ||
             !directory_.at("metadata").is_object() ||
             directory_.at("metadata").value("name", "") != "qwen3.8-27b") {
@@ -450,6 +442,16 @@ public:
         const bool has_dflash2 = directory_.at("components").contains("dflash2");
         if (has_dflash2) { add_dflash2(); }
 
+        // v3 has no weights-profile field. Classify by the complete text inventory, never by
+        // filename, container fingerprint or a representative tensor: every one of the 256
+        // text projections NVFP4 with W8 vocabulary endpoints is the full-NVFP4 storage profile;
+        // anything else is offered to the official mixed FP8/NVFP4 binding, which validates
+        // each tensor's exact format.
+        const bool full_nvfp4 =
+            nvfp4_projections == 256 &&
+            selected_.at("text/output_head")->at("format") == "q8_g32_fp16" &&
+            selected_.at("text/token_embedding")->at("format") == "q8_g32_fp16";
+
         constexpr std::size_t kStructuralObjects = 1012;
         const std::size_t expected = kStructuralObjects + nvfp4_projections +
                                      (has_dflash2 ? 66 : 0);
@@ -518,7 +520,7 @@ public:
         (*template_it)["bytes"] = template_bytes.size();
         V3CompatibilityDirectory result;
         result.directory = {{"identity", {{"model_id", "qwen3.8-27b"},
-                                           {"weights_id", quasar_ ? "quasar-nvfp4" : "nvfp4"}}},
+                                           {"weights_id", full_nvfp4 ? "nvfp4-full" : "nvfp4"}}},
                             {"objects", std::move(objects)}};
         result.payload_overrides.emplace("frontend/chat_template.jinja", template_bytes);
         return result;
@@ -728,7 +730,6 @@ private:
     const Json& directory_;
     const MappedFile& file_;
     std::uint64_t payload_start_;
-    bool quasar_ = false;
     std::map<std::string, const Json*, std::less<>> objects_;
     std::map<std::string, const Json*, std::less<>> selected_;
     std::map<std::string, std::string, std::less<>> physical_names_;

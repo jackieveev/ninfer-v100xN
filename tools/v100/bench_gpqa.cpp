@@ -201,7 +201,7 @@ void run(const char* artifact, const char* cases_path, const char* report_path,
     const auto identity = engine.load_summary();
     require(identity.model_id == "qwen3.8-27b", "requires a Qwen3.8-27B artifact");
     const auto expected_weights = profile == "q4" ? "gguf-q4-k-m" :
-                                  profile == "nvfp4" ? "nvfp4" : "quasar-nvfp4";
+                                  profile == "nvfp4" ? "nvfp4" : "nvfp4-full";
     require(identity.weights_id == expected_weights, "artifact identity does not match the GPQA profile");
     report["model_id"] = identity.model_id;
     report["weights_id"] = identity.weights_id;

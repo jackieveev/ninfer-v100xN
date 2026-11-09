@@ -131,7 +131,7 @@ std::string serve_usage_text(const char* argv0) {
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --prefill-decode-rounds N: experimental decode rounds between prefill steps (1..64, default 1); larger values delay the new request's first token\n"
            "       --volta-long-attention: experimental complete-history SM70 TP2/TP4 INT8 attention (1..8 requests); floating-point output may differ\n"
-           "       --volta-fast-decode: experimental QUASAR TP2/TP4 Text NVFP4 FP32 epilogues and packed MTP W8; output may differ.\n"
+           "       --volta-fast-decode: experimental full-NVFP4 TP2/TP4 Text NVFP4 FP32 epilogues and packed MTP W8; output may differ.\n"
            "       --ram-kv-window: experimental approximate Q/K mean-vector RAM-KV; one SM70 27B Text/MTP request, TP1/TP2/PP2\n"
            "       RAM archive budget defaults to 32000000000 bytes (not process RSS); disabled without the window option\n"
            "       --default-max-tokens defaults to " +
@@ -169,7 +169,7 @@ std::string serve_usage_text(const char* argv0) {
            "--vision.\n"
            "       --tp 4 supports SM70 Qwen3.8-27B NVFP4/native FP8 Text/MTP with "
            "--devices 0,1,2,3; Vision and DFlash are unavailable at TP4.\n"
-           "       --pp 2 selects SM70 Qwen3.8 NVFP4/QUASAR layer pipeline "
+           "       --pp 2 selects SM70 Qwen3.8 NVFP4/full-NVFP4 layer pipeline "
            "execution with --tp 1 --devices 0,1 (Text/None/MTP, max-concurrency 1). "
            "--pipeline-chunks 1..8 controls the prefill wave (default 8; 1 is serial).\n"
            "       --devices lists --tp * --pp device ids, e.g. --devices 1 for --tp 1, or "

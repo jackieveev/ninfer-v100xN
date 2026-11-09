@@ -11,7 +11,7 @@ TP2, MTP4 with the optimized draft head, INT8 KV, CUDA Graphs, 32768 context cap
 and one active request. Windows exposes driver 582.78; no Linux CUDA toolkit is installed.
 The artifact is on a Windows drive mounted through 9p, while the executable is on Linux ext4.
 The retained source build uses the same inference settings with cache retention disabled,
-as described below. The artifact's v3 container identity matches the registered QUASAR package.
+as described below. The artifact's v3 inventory is classified as `qwen3.8-27b/nvfp4-full`.
 
 The existing startup log reports that peer access is unavailable and selects verified CUDA
 UVA D2D staging. Artifact upload takes approximately 129 seconds. This is a load-time observation;

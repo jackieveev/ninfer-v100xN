@@ -32,7 +32,7 @@ The executable `--help` output is the exact source for command-line option spell
 
 | Model | Weights | Download | Versioned model card source |
 |---|---|---|---|
-| Qwen3.8-27B (recommended Text/Vision profile) | `quasar-nvfp4` | [QUASAR v3](https://huggingface.co/MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4-NInfer/tree/v3) | [source quality](model-quality.md); Text/MTP/DFlash; optional TP2 Vision with None/MTP |
+| Qwen3.8-27B (recommended Text/Vision profile) | `nvfp4-full` | [QUASAR v3](https://huggingface.co/MirkoCovizzi/Qwen3.8-27B-QUASAR-NVFP4-NInfer/tree/v3) | [source quality](model-quality.md); Text/MTP/DFlash; optional TP2 Vision with None/MTP |
 | Qwen3.6-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | [published model card](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) |
 | Qwen3.6-27B | `nvfp4` | [Hugging Face](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) | [published model card](https://huggingface.co/neroued/Qwen3.6-27B-nvfp4-NInfer) |
 | Qwen3.8-27B | `groupwise-int` | [Hugging Face](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | [model card](../model-cards/Qwen3.8-27B-NInfer/README.md) |

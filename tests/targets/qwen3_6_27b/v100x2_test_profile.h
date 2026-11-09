@@ -69,7 +69,7 @@ inline void check_identity(const ninfer::Engine& engine) {
     const auto summary = engine.load_summary();
     if (summary.tp != tp() || summary.pp != pp() || summary.model_id != "qwen3.8-27b" ||
         (summary.weights_id != "gguf-q4-k-m" && summary.weights_id != "nvfp4" &&
-         summary.weights_id != "quasar-nvfp4" &&
+         summary.weights_id != "nvfp4-full" &&
          summary.weights_id != "fp8")) {
         throw std::runtime_error("this gate requires a registered parallel Qwen3.8-27B artifact");
     }
