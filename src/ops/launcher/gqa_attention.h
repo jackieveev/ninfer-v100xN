@@ -86,6 +86,12 @@ void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positi
 // ~25 MB at that length. Phase 4 sweeps this.
 inline constexpr std::int32_t kVoltaFlashQBlockTokens = 640;
 
+// The 27B tensor-parallel halves (12q/2kv) and quarters (6q/1kv) run the whole width through
+// the Split-D D256 kernel instead of masked Q-blocks.
+inline constexpr bool volta_splitd_prefill_heads(std::int32_t q_heads) {
+    return q_heads == 12 || q_heads == 6;
+}
+
 // Below this width the chunked route's smaller fixed cost wins, and the staging
 // buffers are not worth allocating.
 inline constexpr std::int32_t kVoltaFlashMinimumWidth = 64;

@@ -467,7 +467,7 @@ void volta_flash_launch_impl(const Tensor& q, const Tensor& k, const Tensor& v,
     const std::int32_t width         = q.ne[2];
     const std::int32_t n_kv_total    = static_cast<std::int32_t>(envelope.max_visible_keys);
     const std::int32_t logical_pages = cache.block_tables.ne[0];
-    if constexpr (kQHeads == 6) { q_block_tokens = width; }
+    if constexpr (volta_splitd_prefill_heads(kQHeads)) { q_block_tokens = width; }
 
     auto* block_tables = static_cast<const std::int32_t*>(cache.block_tables.data);
     auto* rows         = static_cast<const std::int32_t*>(table_rows.data);
@@ -529,7 +529,7 @@ void volta_flash_launch_impl(const Tensor& q, const Tensor& k, const Tensor& v,
         const int convert_blocks =
             static_cast<int>((q_count + kConvertThreads - 1) / kConvertThreads);
 
-        if constexpr (kQHeads == 6) {
+        if constexpr (volta_splitd_prefill_heads(kQHeads)) {
             gqa_attention_volta_splitd_launch(
                 static_cast<const __nv_bfloat16*>(q.data) +
                     static_cast<std::int64_t>(begin) * kQHeads * kHeadDim,

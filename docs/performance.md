@@ -4,6 +4,29 @@ Local hardware: 2 × Tesla V100-SXM2 16 GB, SXM2-to-PCIe adapters, PCIe 3.0 ×16
 
 [llama.cpp / LM Studio controls](llama-comparison.md) · [Other V100 profiles](performance-v100.md) · [TP4/NVLink](tp4.md) · [RAM-KV/PP2](experiments.md) · [Inherited upstream campaigns](performance-upstream.md)
 
+## TP2 PCIe sampled MTP and Split-D prefill (2026-11-09)
+
+Host: 2 × V100-SXM2 16 GB on PCIe 3.0 P2P without NVLink, 175 W limit, CUDA 12.8 / SM70.
+Artifact: a full-NVFP4 Qwen3.8-27B v3 derivative (Swift15) with the optimized proposal head,
+262144 capacity, INT8 group-64 KV, MTP4, long-attention and fast-decode profiles. Requests use
+thinking mode with temperature 1.0, top-p 0.95, top-k 20 and a fixed seed; GPUs cool to at most
+60 °C HBM before each case. Clocks are not locked; HBM throttling leaves about ±5% run-to-run
+decode noise.
+
+Sampled drafts with stored proposal distributions (exact `min(1,p/q)` acceptance):
+
+| Case | Before: accept / decode tok/s | After: accept / decode tok/s |
+|---|---:|---:|
+| 68-token prompt, 4096 output, seed 11 | 28.9% / 89.4 | 44.9% / 116.2 |
+| 68-token prompt, 4096 output, seed 22 | 36.7% / 99.2 | 42.1% / 106.7 |
+| 61774 cached tokens, 1536 output, seed 22 | 30.3% / 78.6 | 40.5% / 92.9 |
+
+Routing the TP2 12q/2kv geometry through the Split-D D256 prefill kernel raises uncached
+61799-token prefill from 1003.2 / 996.5 to 1027.9 / 1029.0 tok/s. The TP2 head-local prefill
+oracle now includes the 2560-query, 85000-key fragmented chunk, which the replaced masked
+Q-block route failed at the registered FP64 criterion and Split-D passes. Split-D changes
+floating-point association, so later sampled trajectories can differ.
+
 ## TP4 concurrent packed-batch decode (2026-11-05)
 
 Release **v0.2.1** extends the packed-batch and packet/norm work to QUASAR TP4.

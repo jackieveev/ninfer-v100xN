@@ -1117,17 +1117,15 @@ int main(int argc, char** argv) {
         for (const auto& test_case : prefill_cases) {
             failures += run_case(DType::I8, test_case, true);
         }
-        if constexpr (kRanks == 4) {
-            // Real TP4 prefill at 85K occupied keys. Each sampled query evaluates
-            // every visible key and dimension against FP64 at the unchanged
-            // registered criterion, both per rank and per head. Full-width
-            // guards/cache checks remain exact; short cases above additionally
-            // qualify full-output TP1 parity and distinguishable head mapping.
-            failures += run_case(
-                DType::I8,
-                {"gqa_attention", 2560, 82440, 85000, MappingPattern::Fragmented, 1507u, false},
-                true, false, ReferenceRoute::OracleOnly);
-        }
+        // Real TP2/TP4 Split-D prefill at 85K occupied keys. Each sampled query
+        // evaluates every visible key and dimension against FP64 at the unchanged
+        // registered criterion, both per rank and per head. Full-width
+        // guards/cache checks remain exact; short cases above additionally
+        // qualify full-output TP1 parity and distinguishable head mapping.
+        failures += run_case(
+            DType::I8,
+            {"gqa_attention", 2560, 82440, 85000, MappingPattern::Fragmented, 1507u, false},
+            true, false, ReferenceRoute::OracleOnly);
     }
     if (prefill_only) {
         std::cout << (failures == 0 ? "PASS" : "FAIL")
