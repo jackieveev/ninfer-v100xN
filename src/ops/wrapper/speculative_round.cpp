@@ -111,6 +111,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       Tensor& lengths, Tensor& anchors, Tensor& licensed_tokens,
                                       Tensor& licensed_counts, Tensor& accepted,
                                       std::int32_t token_domain, const SamplingConfig* configs,
+                                      const DraftDistributionView& proposals,
                                       WorkspaceArena& workspace, cudaStream_t stream) {
     constexpr const char* op = "speculative_accept_greedy_drafts";
     const std::int32_t k     = drafts.ne[0];
@@ -145,7 +146,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
     const DeviceSpan scratch = bytes == 0 ? DeviceSpan{} : workspace.alloc_bytes(bytes);
     detail::speculative_accept_greedy_drafts_launch(
         target_tokens, logits, drafts, current_extents, lengths, anchors, licensed_tokens,
-        licensed_counts, accepted, token_domain, configs, scratch, stream);
+        licensed_counts, accepted, token_domain, configs, proposals, scratch, stream);
 }
 
 void speculative_accept_greedy_tokens(const Tensor& target_tokens, const Tensor& drafts,

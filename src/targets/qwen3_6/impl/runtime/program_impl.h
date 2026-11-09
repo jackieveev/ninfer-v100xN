@@ -1134,9 +1134,25 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
                 } else {
                     const std::int32_t next  = mtp_host_egress->next_extents[row];
                     sequence.mtp_draft_count = static_cast<std::uint32_t>(next);
+                    const bool sampled = request.sampling_host.temperature > 0.0F;
+                    sequence.mtp_draft_q_support.fill(0);
                     for (std::uint32_t step = 0; step < sequence.mtp_draft_count; ++step) {
-                        sequence.mtp_drafts[step] =
-                            mtp_host_egress->next_drafts[step * max_concurrency + row];
+                        const std::size_t slot = step * max_concurrency + row;
+                        sequence.mtp_drafts[step] = mtp_host_egress->next_drafts[slot];
+                        if (!sampled) { continue; }
+                        const std::int32_t support = mtp_host_egress->next_draft_q_support[slot];
+                        if (support <= 0 || support > ops::kDraftDistributionCap) { continue; }
+                        sequence.mtp_draft_q_support[step] = support;
+                        std::copy_n(mtp_host_egress->next_draft_q_ids.begin() +
+                                        slot * ops::kDraftDistributionCap,
+                                    ops::kDraftDistributionCap,
+                                    sequence.mtp_draft_q_ids.begin() +
+                                        step * ops::kDraftDistributionCap);
+                        std::copy_n(mtp_host_egress->next_draft_q_probs.begin() +
+                                        slot * ops::kDraftDistributionCap,
+                                    ops::kDraftDistributionCap,
+                                    sequence.mtp_draft_q_probs.begin() +
+                                        step * ops::kDraftDistributionCap);
                     }
                 }
             } else {
@@ -2870,6 +2886,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
             sequence.mtp_draft_count = request.exact_hit ? 0U : staged.initial_mtp_extent;
             std::copy_n(initial_drafts.begin(), sequence.mtp_draft_count,
                         sequence.mtp_drafts.begin());
+            sequence.mtp_draft_q_support.fill(0);
         } else if (speculative_backend == SpeculativeBackend::DFlash &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");
@@ -3087,6 +3104,7 @@ void ProgramImplCore::finish_exact_hit(SequenceState& sequence, RequestControl& 
         device.synchronize();
         sequence.mtp_kv_valid = frontier;
         sequence.mtp_draft_count = extent;
+        sequence.mtp_draft_q_support.fill(0);
     }
     request.exact_hit.reset();
 }
@@ -3164,8 +3182,22 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
             mtp_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1);
             for (std::uint32_t j = 0; j < draft_window; ++j) {
-                mtp_host_ingress->current_drafts[row * draft_window + j] =
+                const std::size_t slot = row * draft_window + j;
+                mtp_host_ingress->current_drafts[slot] =
                     j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
+                mtp_host_ingress->current_draft_q_support[slot] =
+                    j < extent ? sequence.mtp_draft_q_support[j] : 0;
+                if (mtp_host_ingress->current_draft_q_support[slot] != 0) {
+                    std::copy_n(sequence.mtp_draft_q_ids.begin() + j * ops::kDraftDistributionCap,
+                                ops::kDraftDistributionCap,
+                                mtp_host_ingress->current_draft_q_ids.begin() +
+                                    slot * ops::kDraftDistributionCap);
+                    std::copy_n(sequence.mtp_draft_q_probs.begin() +
+                                    j * ops::kDraftDistributionCap,
+                                ops::kDraftDistributionCap,
+                                mtp_host_ingress->current_draft_q_probs.begin() +
+                                    slot * ops::kDraftDistributionCap);
+                }
             }
             for (std::uint32_t j = 0; j < width; ++j) {
                 const std::uint32_t position = frontier + std::min(j, extent);

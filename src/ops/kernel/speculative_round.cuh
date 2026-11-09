@@ -6,6 +6,7 @@
 // registered full-vocabulary stochastic route uses the sampling partial/group
 // pipeline and caller-owned workspace, while greedy commit remains one thread.
 
+#include "ninfer/ops/speculative_round.h"
 #include "ops/kernel/sampling_device.cuh"
 
 #include <cuda_bf16.h>
@@ -56,25 +57,98 @@ speculative_workspace_row(SamplingWorkspace workspace, std::size_t row_stride, s
     return workspace;
 }
 
+// Stored proposal distribution of draft i in row `row`; support 0 means one-hot at the draft.
+struct DraftDistribution {
+    int support         = 0;
+    const int* ids      = nullptr;
+    const float* probs  = nullptr;
+};
+
+__device__ __forceinline__ DraftDistribution speculative_draft_distribution(
+    const DraftDistributionView& proposals, int row, int k, int i) {
+    DraftDistribution out;
+    if (proposals.support == nullptr) { return out; }
+    const int slot = row * k + i;
+    out.support    = proposals.support[slot];
+    out.ids        = proposals.ids + static_cast<std::int64_t>(slot) * kDraftDistributionCap;
+    out.probs      = proposals.probs + static_cast<std::int64_t>(slot) * kDraftDistributionCap;
+    return out;
+}
+
+__device__ __forceinline__ float speculative_draft_probability(const DraftDistribution& q,
+                                                               int token) {
+    for (int j = 0; j < q.support; ++j) {
+        if (q.ids[j] == token) { return q.probs[j]; }
+    }
+    return 0.0f;
+}
+
+// thread-0 helper: one stored-distribution acceptance step. Returns true when draft d is
+// accepted; otherwise writes the residual correction token. Without a stored distribution
+// (or if d is somehow outside it) the draft is treated as one-hot, which is exact for any
+// draft chosen independently of the verification randomness.
+__device__ __forceinline__ bool speculative_accept_step(const int* cand_idx, const float* prob,
+                                                        int n, DraftDistribution q, int d,
+                                                        float u, float u_residual,
+                                                        int* correction) {
+    float pd = 0.0f;
+    for (int j = 0; j < n; ++j) {
+        if (cand_idx[j] == d) {
+            pd = prob[j];
+            break;
+        }
+    }
+    float qd = q.support > 0 ? speculative_draft_probability(q, d) : 0.0f;
+    if (!(qd > 0.0f)) {
+        q.support = 0;
+        qd        = 1.0f;
+    }
+    if (u * qd < pd) { return true; }
+    if (q.support == 0) {
+        *correction = sampling_pick_from_support(cand_idx, prob, n, d, u_residual);
+        return false;
+    }
+    float mass = 0.0f;
+    for (int j = 0; j < n; ++j) {
+        mass += fmaxf(prob[j] - speculative_draft_probability(q, cand_idx[j]), 0.0f);
+    }
+    if (!(mass > 0.0f)) {
+        *correction = sampling_pick_from_support(cand_idx, prob, n, -1, u_residual);
+        return false;
+    }
+    const float goal = u_residual * mass;
+    float acc        = 0.0f;
+    int picked       = -1;
+    for (int j = 0; j < n; ++j) {
+        const float r = fmaxf(prob[j] - speculative_draft_probability(q, cand_idx[j]), 0.0f);
+        if (!(r > 0.0f)) { continue; }
+        acc += r;
+        picked = cand_idx[j];
+        if (goal < acc) { break; }
+    }
+    *correction = picked;
+    return false;
+}
+
 // Commits the round's accepted tokens plus one correction/bonus token, then
 // advances the target length. The greedy branch
 // (config temperature <= 0) is bit-identical to the original argmax accept: keep
 // the longest draft prefix whose target argmax matches, then take the target
 // argmax at the divergence column. The sampling branch (temperature > 0) runs
-// distribution-correct speculative rejection sampling over the verify logits with
-// a one-hot (greedy) draft: accept drafts[i] with probability p_i(drafts[i]) under
-// the truncated target distribution, resample from the masked residual on the
-// first rejection, and draw a bonus from the last column when every draft accepts.
-// The draft-proposal path stays greedy, so q is one-hot and the accept test
-// collapses to `u < p_i(drafts[i])`. Launch with a single block of kSamplerBlock
-// threads; only thread 0 performs the sequential accept/commit while the whole
-// block cooperates on the per-column truncated-distribution build.
+// distribution-correct speculative rejection sampling over the verify logits:
+// accept drafts[i] with probability min(1, p_i/q_i) under the truncated target
+// distribution, resample from the residual max(0, p_i - q_i) on the first
+// rejection, and draw a bonus from the last column when every draft accepts.
+// q_i is the stored proposal distribution or one-hot at drafts[i]. Launch with a
+// single block of kSamplerBlock threads; only thread 0 performs the sequential
+// accept/commit while the whole block cooperates on the per-column
+// truncated-distribution build.
 __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_drafts_kernel(
     const std::int32_t* target_tokens, const __nv_bfloat16* logits, const std::int32_t* drafts,
     const std::int32_t* current_extents, std::int32_t* lengths, std::int32_t* anchors,
     std::int32_t* licensed_tokens, std::int32_t* licensed_counts, std::int32_t* accepted,
-    const SamplingConfig* configs, std::int32_t token_domain, std::int32_t physical_rows,
-    std::int32_t k) {
+    const SamplingConfig* configs, DraftDistributionView proposals, std::int32_t token_domain,
+    std::int32_t physical_rows, std::int32_t k) {
     const int tid                   = threadIdx.x;
     const int row                   = static_cast<int>(blockIdx.x);
     const int cols                  = k + 1;
@@ -147,23 +221,18 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_accept_greedy_draft
         if (tid == 0 && done_sh == 0) {
             const int L = L_sh;
             if (i < extent) {
-                const int d = row_drafts[i];
-                float pd    = 0.0f;
-                for (int j = 0; j < n_support; ++j) {
-                    if (cand_idx[j] == d) {
-                        pd = prob[j];
-                        break;
-                    }
-                }
                 const float u =
                     sampling_uniform(cfg.seed, L + i + 1, kSamplePurposeSpeculativeAccept, 0u);
-                if (u < pd) {
+                const float ur = sampling_uniform(cfg.seed, L + i + 1,
+                                                  kSamplePurposeSpeculativeCorrection, 0u);
+                int correction = 0;
+                if (speculative_accept_step(cand_idx, prob, n_support,
+                                            speculative_draft_distribution(proposals, row, k, i),
+                                            row_drafts[i], u, ur, &correction)) {
                     a_sh = i + 1; // accept drafts[i], keep verifying
                 } else {
-                    const float ur = sampling_uniform(cfg.seed, L + i + 1,
-                                                      kSamplePurposeSpeculativeCorrection, 0u);
-                    tstar_sh       = sampling_pick_from_support(cand_idx, prob, n_support, d, ur);
-                    done_sh        = 1;
+                    tstar_sh = correction;
+                    done_sh  = 1;
                 }
             } else {
                 // Every draft accepted: bonus token from the last verify column.
@@ -283,9 +352,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
     const std::int32_t* target_tokens, const std::int32_t* drafts,
     const std::int32_t* current_extents, std::int32_t* lengths, std::int32_t* anchors,
     std::int32_t* licensed_tokens, std::int32_t* licensed_counts, std::int32_t* accepted,
-    const SamplingConfig* configs, std::int32_t token_domain, std::int32_t cols,
-    std::int32_t partial_blocks, std::int32_t group_count, SamplingWorkspace workspace,
-    std::size_t workspace_row_stride) {
+    const SamplingConfig* configs, DraftDistributionView proposals, std::int32_t token_domain,
+    std::int32_t cols, std::int32_t partial_blocks, std::int32_t group_count,
+    SamplingWorkspace workspace, std::size_t workspace_row_stride) {
     const int row   = static_cast<int>(blockIdx.z);
     const int group = static_cast<int>(blockIdx.x);
     const int col   = static_cast<int>(blockIdx.y);
@@ -415,23 +484,16 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
                 const int* dist_idx    = workspace.dist_idx + sampling_dist_offset(i, 0);
                 const float* dist_prob = workspace.dist_prob + sampling_dist_offset(i, 0);
                 if (i < extent) {
-                    const int d = row_drafts[i];
-                    float pd    = 0.0f;
-                    for (int j = 0; j < n; ++j) {
-                        if (dist_idx[j] == d) {
-                            pd = dist_prob[j];
-                            break;
-                        }
-                    }
                     const float u =
                         sampling_uniform(cfg.seed, L + i + 1, kSamplePurposeSpeculativeAccept, 0u);
-                    if (u < pd) {
+                    const float ur = sampling_uniform(cfg.seed, L + i + 1,
+                                                      kSamplePurposeSpeculativeCorrection, 0u);
+                    if (speculative_accept_step(dist_idx, dist_prob, n,
+                                                speculative_draft_distribution(proposals, row, k, i),
+                                                row_drafts[i], u, ur, &tstar)) {
                         a = i + 1;
                         continue;
                     }
-                    const float ur = sampling_uniform(cfg.seed, L + i + 1,
-                                                      kSamplePurposeSpeculativeCorrection, 0u);
-                    tstar          = sampling_pick_from_support(dist_idx, dist_prob, n, d, ur);
                     break;
                 }
                 const float u =

@@ -253,6 +253,12 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
         ingress_tensor(offsetof(MtpDecodeIngress, target_valid_columns), DType::I32, {batch});
     current_drafts =
         ingress_tensor(offsetof(MtpDecodeIngress, current_drafts), DType::I32, {drafts, batch});
+    current_draft_q_support = ingress_tensor(offsetof(MtpDecodeIngress, current_draft_q_support),
+                                             DType::I32, {drafts, batch});
+    current_draft_q_ids     = ingress_tensor(offsetof(MtpDecodeIngress, current_draft_q_ids),
+                                             DType::I32, {ops::kDraftDistributionCap, drafts, batch});
+    current_draft_q_probs   = ingress_tensor(offsetof(MtpDecodeIngress, current_draft_q_probs),
+                                             DType::FP32, {ops::kDraftDistributionCap, drafts, batch});
     target_rope_positions = ingress_tensor(offsetof(MtpDecodeIngress, target_rope_positions),
                                            DType::I32, {width, batch});
     text_kv_table_rows =
@@ -272,6 +278,12 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
         egress_tensor(offsetof(MtpDecodeEgress, accepted_drafts), DType::I32, {batch});
     next_drafts =
         egress_tensor(offsetof(MtpDecodeEgress, next_drafts), DType::I32, {batch, drafts});
+    next_draft_q_support = egress_tensor(offsetof(MtpDecodeEgress, next_draft_q_support),
+                                         DType::I32, {batch, drafts});
+    next_draft_q_ids     = egress_tensor(offsetof(MtpDecodeEgress, next_draft_q_ids), DType::I32,
+                                         {ops::kDraftDistributionCap, batch, drafts});
+    next_draft_q_probs   = egress_tensor(offsetof(MtpDecodeEgress, next_draft_q_probs),
+                                         DType::FP32, {ops::kDraftDistributionCap, batch, drafts});
     next_extents     = egress_tensor(offsetof(MtpDecodeEgress, next_extents), DType::I32, {batch});
     verify_ids       = layout.verify_ids.bind(backing);
     target_positions = layout.target_positions.bind(backing);

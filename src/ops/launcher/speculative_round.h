@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "ninfer/ops/sampling.h"
+#include "ninfer/ops/speculative_round.h"
 
 #include <cuda_runtime.h>
 
@@ -20,8 +21,9 @@ void speculative_accept_greedy_drafts_launch(const Tensor& target_tokens, const 
                                              Tensor& lengths, Tensor& anchors,
                                              Tensor& licensed_tokens, Tensor& licensed_counts,
                                              Tensor& accepted, std::int32_t token_domain,
-                                             const SamplingConfig* configs, DeviceSpan workspace,
-                                             cudaStream_t stream);
+                                             const SamplingConfig* configs,
+                                             const DraftDistributionView& proposals,
+                                             DeviceSpan workspace, cudaStream_t stream);
 void speculative_accept_greedy_tokens_launch(const Tensor& target_tokens, const Tensor& drafts,
                                              const Tensor& current_extents, Tensor& lengths,
                                              Tensor& anchors, Tensor& licensed_tokens,

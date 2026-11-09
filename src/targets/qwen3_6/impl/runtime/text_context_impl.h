@@ -26,6 +26,7 @@
 #include "ninfer/ops/mtp_pack.h"
 #include "ninfer/ops/position.h"
 #include "ninfer/ops/proposal_argmax.h"
+#include "ninfer/ops/proposal_sampling.h"
 #include "ninfer/ops/residual_add.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
@@ -3092,6 +3093,42 @@ void TextContext::mtp_propose_batch(const std::array<Tensor, kMaximumExecutionDe
     require_tensor_shape(draft_tokens, DType::I32, {batch}, "MTP proposal batch tokens");
     auto scopes = workspace_scopes();
     proposal_argmax_tp2(hidden, logits, draft_tokens);
+}
+
+void TextContext::mtp_propose_sample_batch(
+    const std::array<Tensor, kMaximumExecutionDevices>& hidden,
+    const std::array<Tensor, kMaximumExecutionDevices>& logits, const ops::SamplingConfig* configs,
+    const Tensor& logical_positions, std::int32_t step, Tensor& draft_tokens, Tensor& q_support,
+    Tensor& q_ids, Tensor& q_probs) {
+    if (proposal_head_ == nullptr || ec().device_count != 2) {
+        mtp_propose_batch(hidden, logits, draft_tokens);
+        CUDA_CHECK(cudaMemsetAsync(q_support.data, 0, q_support.bytes(), stream_for(0)));
+        return;
+    }
+    const std::int32_t batch = hidden[0].ne[1];
+    for (std::size_t r = 0; r < ec().device_count; ++r) {
+        require_tensor_shape(hidden[r], DType::BF16, {kCfg.hidden, batch},
+                             "MTP proposal batch hidden");
+    }
+    require_tensor_shape(draft_tokens, DType::I32, {batch}, "MTP proposal batch tokens");
+    const auto heads = rank_map([&](int rank) {
+        const Weight* head = rank == 0 ? proposal_head_ : proposal_head_peer_[rank - 1];
+        if (head == nullptr || head->n != proposal_head_n_) {
+            throw std::logic_error("proposal head shards disagree on width");
+        }
+        return *head;
+    });
+    const auto work = workspaces();
+    auto scopes = workspace_scopes();
+    const auto shards = rank_map([&](int rank) {
+        return work[rank]->alloc(DType::BF16, {proposal_head_n_, batch});
+    });
+    ops::linear_column_parallel(active(hidden), active(heads), active(shards),
+                                ops::LinearPolicy::A16Only, active(work), ec());
+    Tensor gathered = work_.alloc(DType::BF16, {proposal_head_n_ * 2, batch});
+    ops::gather_columns_rank0(gathered, active(shards), ec(), *tp_[0].events);
+    ops::proposal_sample(gathered, proposal_head_ids_, configs, logical_positions, step,
+                         draft_tokens, q_support, q_ids, q_probs, work_, stream_for(0));
 }
 
 void TextContext::mtp_forward_batch(const Tensor& ids, const std::array<Tensor, kMaximumExecutionDevices>& hidden,

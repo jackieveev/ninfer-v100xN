@@ -1,7 +1,10 @@
 #include "ninfer/ops/speculative_round.h"
 #include "ops/op_tester.h"
 
+#include <cuda_runtime.h>
+
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -202,7 +205,8 @@ int execute_accept_case(const std::string& label, const std::vector<std::int32_t
     } else {
         ops::speculative_accept_greedy_drafts(
             targets, logits, draft_tensor, extent, length, token, sampled, num_sampled, accepted,
-            token_domain, static_cast<const ops::SamplingConfig*>(d_config.p), workspace, nullptr);
+            token_domain, static_cast<const ops::SamplingConfig*>(d_config.p), ops::DraftDistributionView{}, workspace,
+            nullptr);
     }
     cuda_synchronize();
 
@@ -377,7 +381,8 @@ int batched_sampling_workspace_stride_case() {
     WorkspaceArena workspace(workspace_bytes);
     ops::speculative_accept_greedy_drafts(
         targets, logits_tensor, draft_tensor, extents, lengths, anchors, licensed, counts, accepted,
-        token_domain, static_cast<const ops::SamplingConfig*>(d_configs.p), workspace, nullptr);
+        token_domain, static_cast<const ops::SamplingConfig*>(d_configs.p), ops::DraftDistributionView{}, workspace,
+        nullptr);
     cuda_synchronize();
 
     int failures = verify_exact("speculative sampling B=2 licensed",
@@ -413,6 +418,212 @@ int batched_sampling_workspace_stride_case() {
                              from_device<std::int32_t>(greedy_lengths, batch), {101, 203});
     failures += verify_exact("speculative greedy B=2 anchors",
                              from_device<std::int32_t>(d_anchors, batch), {10, 32});
+    return failures;
+}
+
+int proposal_sample_case() {
+    constexpr int rows  = 1024;
+    constexpr int batch = 3;
+    constexpr int cap   = ops::kDraftDistributionCap;
+    constexpr int kMap  = 5000;
+    std::vector<std::uint16_t> logits(static_cast<std::size_t>(rows) * batch, f32_to_bf16(-30.0f));
+    const auto at = [&](int row, int v) -> std::uint16_t& {
+        return logits[static_cast<std::size_t>(row) * rows + static_cast<std::size_t>(v)];
+    };
+    at(0, 3)   = f32_to_bf16(5.0f);
+    at(0, 4)   = f32_to_bf16(4.0f);
+    at(1, 777) = f32_to_bf16(5.0f);
+    at(1, 778) = f32_to_bf16(4.5f);
+    at(2, 100) = f32_to_bf16(3.0f);
+    at(2, 600) = f32_to_bf16(2.0f);
+    at(2, 900) = f32_to_bf16(2.0f);
+    std::vector<std::int32_t> id_map(rows);
+    for (int v = 0; v < rows; ++v) id_map[static_cast<std::size_t>(v)] = v + kMap;
+
+    ops::SamplingConfig greedy{};
+    ops::SamplingConfig top1{};
+    top1.temperature = 1.0f;
+    top1.top_k       = 1;
+    top1.seed        = 7;
+    ops::SamplingConfig sampled{};
+    sampled.temperature = 0.7f;
+    sampled.top_k       = 20;
+    sampled.top_p       = 1.0f;
+    sampled.min_p       = 0.01f;
+    sampled.seed        = 0x5eedull;
+    DeviceBuffer d_logits    = to_device(logits);
+    DeviceBuffer d_map       = to_device(id_map);
+    DeviceBuffer d_configs   = to_device(std::vector<ops::SamplingConfig>{greedy, top1, sampled});
+    DeviceBuffer d_positions = to_device<std::int32_t>({40, 41, 42});
+    DeviceBuffer d_tokens(batch * sizeof(std::int32_t));
+    DeviceBuffer d_support(batch * sizeof(std::int32_t));
+    DeviceBuffer d_ids(static_cast<std::size_t>(cap) * batch * sizeof(std::int32_t));
+    DeviceBuffer d_probs(static_cast<std::size_t>(cap) * batch * sizeof(float));
+    Tensor logits_tensor(d_logits.p, DType::BF16, {rows, batch});
+    Tensor positions(d_positions.p, DType::I32, {batch});
+    Tensor tokens(d_tokens.p, DType::I32, {batch});
+    Tensor support(d_support.p, DType::I32, {batch});
+    Tensor ids(d_ids.p, DType::I32, {cap, batch});
+    Tensor probs(d_probs.p, DType::FP32, {cap, batch});
+    WorkspaceArena workspace(ops::proposal_sample_workspace_capacity_bytes(rows, batch) + 4096);
+    const auto* configs = static_cast<const ops::SamplingConfig*>(d_configs.p);
+    const auto* map     = static_cast<const std::int32_t*>(d_map.p);
+
+    ops::proposal_sample(logits_tensor, map, configs, positions, 0, tokens, support, ids, probs,
+                         workspace, nullptr);
+    cuda_synchronize();
+    int failures = 0;
+    const auto host_tokens  = from_device<std::int32_t>(d_tokens, batch);
+    const auto host_support = from_device<std::int32_t>(d_support, batch);
+    const auto host_ids     = from_device<std::int32_t>(d_ids, cap * batch);
+    const auto host_probs   = from_device<float>(d_probs, cap * batch);
+    failures += verify_exact("proposal_sample greedy/top1 tokens",
+                             std::vector<std::int32_t>{host_tokens[0], host_tokens[1]},
+                             std::vector<std::int32_t>{3 + kMap, 777 + kMap});
+    failures += verify_exact("proposal_sample supports", host_support,
+                             std::vector<std::int32_t>{0, 1, 3});
+
+    // FP64 oracle of the truncated proposal distribution from the represented BF16 logits.
+    const double x[3] = {3.0, 2.0, 2.0};
+    double z          = 0.0;
+    for (double v : x) z += std::exp((v - x[0]) / 0.7);
+    const std::vector<std::int32_t> want_ids{100 + kMap, 600 + kMap, 900 + kMap};
+    for (int j = 0; j < cap; ++j) {
+        const std::int32_t want_greedy = -1;
+        const std::int32_t want_top1   = j == 0 ? 777 + kMap : -1;
+        const std::int32_t want_sample = j < 3 ? want_ids[static_cast<std::size_t>(j)] : -1;
+        const double want_prob         = j < 3 ? std::exp((x[j] - x[0]) / 0.7) / z : 0.0;
+        if (host_ids[static_cast<std::size_t>(j)] != want_greedy ||
+            host_ids[static_cast<std::size_t>(cap + j)] != want_top1 ||
+            host_ids[static_cast<std::size_t>(2 * cap + j)] != want_sample ||
+            std::abs(host_probs[static_cast<std::size_t>(2 * cap + j)] - want_prob) > 1e-5 ||
+            std::abs(host_probs[static_cast<std::size_t>(cap + j)] - (j == 0 ? 1.0 : 0.0)) > 1e-6) {
+            std::cerr << "proposal_sample distribution mismatch at slot " << j << "\n";
+            ++failures;
+            break;
+        }
+    }
+
+    constexpr int trials = 4000;
+    std::vector<int> counts(3, 0);
+    for (int step = 0; step < trials; ++step) {
+        ops::proposal_sample(logits_tensor, map, configs, positions, step, tokens, support, ids,
+                             probs, workspace, nullptr);
+        const std::int32_t drawn = from_device<std::int32_t>(d_tokens, batch)[2];
+        const auto found         = std::find(want_ids.begin(), want_ids.end(), drawn);
+        if (found == want_ids.end()) {
+            std::cerr << "proposal_sample drew a token outside its support\n";
+            return failures + 1;
+        }
+        ++counts[static_cast<std::size_t>(found - want_ids.begin())];
+    }
+    for (int j = 0; j < 3; ++j) {
+        const double freq = static_cast<double>(counts[static_cast<std::size_t>(j)]) / trials;
+        const double want = std::exp((x[j] - x[0]) / 0.7) / z;
+        if (std::abs(freq - want) > 0.03) {
+            std::cerr << "proposal_sample draw frequency " << freq << " != " << want << "\n";
+            ++failures;
+        }
+    }
+    return failures;
+}
+
+// Drafts drawn from a stored distribution q must commit tokens distributed as the target p.
+int stored_distribution_accept_case(int physical_rows) {
+    constexpr int k   = 1;
+    constexpr int cap = ops::kDraftDistributionCap;
+    const int token_domain = physical_rows;
+    std::vector<std::uint16_t> logits(static_cast<std::size_t>(physical_rows) * (k + 1),
+                                      f32_to_bf16(-30.0f));
+    const std::int32_t p_tokens[3] = {7, 11, 13};
+    const double p_logits[3]       = {2.0, 1.0, 0.0};
+    for (int col = 0; col <= k; ++col) {
+        for (int j = 0; j < 3; ++j) {
+            logits[static_cast<std::size_t>(col) * physical_rows +
+                   static_cast<std::size_t>(p_tokens[j])] =
+                f32_to_bf16(static_cast<float>(p_logits[j]));
+        }
+    }
+    double z = 0.0;
+    for (double v : p_logits) z += std::exp(v);
+    const std::int32_t q_tokens[3] = {7, 11, 17};
+    const float q_probs[3]         = {0.2f, 0.5f, 0.3f};
+    std::vector<std::int32_t> q_ids(cap, -1);
+    std::vector<float> q_prob_values(cap, 0.0f);
+    for (int j = 0; j < 3; ++j) {
+        q_ids[static_cast<std::size_t>(j)]         = q_tokens[j];
+        q_prob_values[static_cast<std::size_t>(j)] = q_probs[j];
+    }
+
+    DeviceBuffer d_targets = to_device<std::int32_t>({7, 7});
+    DeviceBuffer d_logits  = to_device(logits);
+    DeviceBuffer d_drafts  = to_device<std::int32_t>({0});
+    DeviceBuffer d_extents = to_device<std::int32_t>({k});
+    DeviceBuffer d_lengths = to_device<std::int32_t>({0});
+    DeviceBuffer d_anchors = to_device<std::int32_t>({-1});
+    DeviceBuffer d_licensed(static_cast<std::size_t>(k + 1) * sizeof(std::int32_t));
+    DeviceBuffer d_counts(sizeof(std::int32_t));
+    DeviceBuffer d_accepted(sizeof(std::int32_t));
+    DeviceBuffer d_support = to_device<std::int32_t>({3});
+    DeviceBuffer d_q_ids   = to_device(q_ids);
+    DeviceBuffer d_q_probs = to_device(q_prob_values);
+    ops::SamplingConfig config{};
+    config.temperature = 1.0f;
+    config.top_k       = 20;
+    config.top_p       = 1.0f;
+    config.min_p       = 0.01f;
+    DeviceBuffer d_config = device_config(config);
+
+    Tensor targets(d_targets.p, DType::I32, {k + 1, 1});
+    Tensor logits_tensor(d_logits.p, DType::BF16, {physical_rows, k + 1, 1});
+    Tensor draft_tensor(d_drafts.p, DType::I32, {k, 1});
+    Tensor extents(d_extents.p, DType::I32, {1});
+    Tensor lengths(d_lengths.p, DType::I32, {1});
+    Tensor anchors(d_anchors.p, DType::I32, {1});
+    Tensor licensed(d_licensed.p, DType::I32, {k + 1, 1});
+    Tensor counts(d_counts.p, DType::I32, {1});
+    Tensor accepted(d_accepted.p, DType::I32, {1});
+    const ops::DraftDistributionView proposals{static_cast<const std::int32_t*>(d_support.p),
+                                               static_cast<const std::int32_t*>(d_q_ids.p),
+                                               static_cast<const float*>(d_q_probs.p)};
+    WorkspaceArena workspace(
+        ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(token_domain, k, k, 1, 1) +
+        4096);
+
+    constexpr int trials = 4000;
+    std::uint64_t state  = 0x9e3779b97f4a7c15ull;
+    std::vector<int> committed(3, 0);
+    for (int trial = 0; trial < trials; ++trial) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        const double u = static_cast<double>(state >> 11) * 0x1.0p-53;
+        const std::int32_t draft = u < 0.2 ? q_tokens[0] : (u < 0.7 ? q_tokens[1] : q_tokens[2]);
+        const std::int32_t length = trial * 4;
+        cudaMemcpy(d_drafts.p, &draft, sizeof(draft), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_lengths.p, &length, sizeof(length), cudaMemcpyHostToDevice);
+        ops::speculative_accept_greedy_drafts(
+            targets, logits_tensor, draft_tensor, extents, lengths, anchors, licensed, counts,
+            accepted, token_domain, static_cast<const ops::SamplingConfig*>(d_config.p), proposals,
+            workspace, nullptr);
+        const std::int32_t first = from_device<std::int32_t>(d_licensed, k + 1)[0];
+        const auto found         = std::find(std::begin(p_tokens), std::end(p_tokens), first);
+        if (found == std::end(p_tokens)) {
+            std::cerr << "stored-distribution accept committed a token outside p's support\n";
+            return 1;
+        }
+        ++committed[static_cast<std::size_t>(found - std::begin(p_tokens))];
+    }
+    int failures = 0;
+    for (int j = 0; j < 3; ++j) {
+        const double freq = static_cast<double>(committed[static_cast<std::size_t>(j)]) / trials;
+        const double want = std::exp(p_logits[j]) / z;
+        if (std::abs(freq - want) > 0.03) {
+            std::cerr << "stored-distribution accept (rows " << physical_rows << ") frequency "
+                      << freq << " != target " << want << "\n";
+            ++failures;
+        }
+    }
     return failures;
 }
 
@@ -518,6 +729,9 @@ int main() {
     failures += greedy_accept_case(15, 7, 257);
     failures += deterministic_sampling_case();
     failures += batched_sampling_workspace_stride_case();
+    failures += proposal_sample_case();
+    failures += stored_distribution_accept_case(257);
+    failures += stored_distribution_accept_case(248320);
     failures += select_hidden_case(5120, 6, 0);
     failures += select_hidden_case(5120, 6, 5);
     failures += select_hidden_case(2048, 16, 7);

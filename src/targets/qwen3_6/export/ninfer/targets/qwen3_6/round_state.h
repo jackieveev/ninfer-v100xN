@@ -2,6 +2,7 @@
 
 #include "core/layout.h"
 #include "core/tensor.h"
+#include "ninfer/ops/proposal_sampling.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/types.h"
 
@@ -51,6 +52,14 @@ struct MtpDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> current_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
     std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> current_drafts{};
+    // Stored proposal distributions of current_drafts, draft-major within a row:
+    // support[row*K+j], ids/probs[(row*K+j)*cap+q]. Support 0 means a one-hot draft.
+    std::array<std::int32_t, kMaximumConcurrency * kMtpDecodeMaximumDrafts>
+        current_draft_q_support{};
+    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        current_draft_q_ids{};
+    std::array<float, kMaximumConcurrency * kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        current_draft_q_probs{};
     std::array<std::int32_t, kMaximumConcurrency * kMtpDecodeMaximumWidth> target_rope_positions{};
     std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
     std::array<std::int32_t, kMaximumConcurrency> mtp_kv_table_rows{};
@@ -65,6 +74,13 @@ struct MtpDecodeEgress {
     std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
     // Step-major: all B rows for proposal step 0, followed by all B rows for step 1, etc.
     std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> next_drafts{};
+    // Proposal distributions of next_drafts, step-major like next_drafts:
+    // support[step*C+row], ids/probs[(step*C+row)*cap+q].
+    std::array<std::int32_t, kMaximumConcurrency * kMtpDecodeMaximumDrafts> next_draft_q_support{};
+    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        next_draft_q_ids{};
+    std::array<float, kMaximumConcurrency * kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        next_draft_q_probs{};
     std::array<std::int32_t, kMaximumConcurrency> next_extents{};
 };
 
@@ -210,6 +226,9 @@ struct MtpDecodeState {
     Tensor current_extents;
     Tensor target_valid_columns;
     Tensor current_drafts;
+    Tensor current_draft_q_support;
+    Tensor current_draft_q_ids;
+    Tensor current_draft_q_probs;
     Tensor target_rope_positions;
     Tensor text_kv_table_rows;
     Tensor mtp_kv_table_rows;
@@ -220,6 +239,9 @@ struct MtpDecodeState {
     Tensor licensed_counts;
     Tensor accepted_drafts;
     Tensor next_drafts;
+    Tensor next_draft_q_support;
+    Tensor next_draft_q_ids;
+    Tensor next_draft_q_probs;
     Tensor next_extents;
     Tensor verify_ids;
     Tensor target_positions;

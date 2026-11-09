@@ -295,9 +295,14 @@ For `k` configured draft tokens, the runtime prepares a candidate window, runs t
 and accepts only the prefix licensed by the target distribution.
 
 In greedy mode, each draft token is accepted while it equals the target argmax at that position. In
-sampling mode, proposal and target probabilities use the same processed distributions and the
-accept/reject correction preserves the target distribution. A bad draft therefore reduces
-acceptance and throughput; it must not change the distribution of emitted target tokens.
+sampling mode, the TP2 optimized proposal head samples each draft from its own truncated
+distribution `q` (top-20 candidates processed with the request's temperature/top-k/top-p/min-p,
+without penalties) and stores `q` with the draft. Verification accepts draft `d` with probability
+`min(1, p(d)/q(d))` and, on rejection, samples the normalized residual `max(0, p - q)`. Drafts
+without a stored distribution (prefill bridge, other proposal routes) are one-hot: accept with
+`p(d)` and resample `p` without `d`. Either rule preserves the target distribution. A bad draft
+therefore reduces acceptance and throughput; it must not change the distribution of emitted
+target tokens.
 
 Target verification writes candidate KV into provisioned but unpublished extents, reads each
 lane's current GDN checkpoint, and produces Program-owned ReplaySSM records without modifying any

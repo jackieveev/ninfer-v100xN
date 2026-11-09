@@ -33,8 +33,8 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
         ops::speculative_accept_greedy_drafts(
             frame.target_tokens, frame.target_logits, frame.drafts, frame.current_extents,
             frame.frontiers, frame.anchors, frame.licensed_tokens, frame.licensed_counts,
-            frame.accepted_drafts, TextConfig::token_domain, frame.sampling, execution.work,
-            execution.device.stream);
+            frame.accepted_drafts, TextConfig::token_domain, frame.sampling, frame.proposals,
+            execution.work, execution.device.stream);
     }
     ops::speculative_select_accepted_hidden(frame.target_hidden, frame.accepted_drafts,
                                             frame.selected_hidden, execution.device.stream);
@@ -91,7 +91,8 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
             ops::speculative_accept_greedy_drafts(
                 value.target_tokens, value.target_logits, value.drafts, value.current_extents,
                 value.frontiers, value.anchors, value.licensed_tokens, value.licensed_counts,
-                value.accepted_drafts, TextConfig::token_domain, value.sampling, work, stream);
+                value.accepted_drafts, TextConfig::token_domain, value.sampling, value.proposals,
+                work, stream);
         }
         ops::speculative_select_accepted_hidden(value.target_hidden, value.accepted_drafts,
                                                 value.selected_hidden, stream);

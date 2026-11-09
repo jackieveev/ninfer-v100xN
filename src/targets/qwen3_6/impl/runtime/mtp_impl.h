@@ -24,6 +24,9 @@ struct MtpRoundView {
     Tensor current_extents;
     Tensor target_valid;
     Tensor current_drafts;
+    Tensor current_q_support;
+    Tensor current_q_ids;
+    Tensor current_q_probs;
     Tensor target_rope;
     Tensor text_rows;
     Tensor mtp_rows;
@@ -46,6 +49,9 @@ struct MtpRoundView {
     Tensor ar_rope_positions;
     Tensor ar_valid_columns;
     Tensor next_drafts;
+    Tensor next_q_support;
+    Tensor next_q_ids;
+    Tensor next_q_probs;
     Tensor proposal_logits;
     const ops::SamplingConfig* sampling = nullptr;
 };
@@ -58,6 +64,9 @@ MtpRoundView slice_mtp_frame(qwen3_6::MtpDecodeState& frame, std::int32_t batch_
     out.current_extents   = frame.current_extents.slice(0, 0, batch_size);
     out.target_valid      = frame.target_valid_columns.slice(0, 0, batch_size);
     out.current_drafts    = frame.current_drafts.slice(1, 0, batch_size);
+    out.current_q_support = frame.current_draft_q_support.slice(1, 0, batch_size);
+    out.current_q_ids     = frame.current_draft_q_ids.slice(2, 0, batch_size);
+    out.current_q_probs   = frame.current_draft_q_probs.slice(2, 0, batch_size);
     out.target_rope       = frame.target_rope_positions.slice(1, 0, batch_size);
     out.text_rows         = frame.text_kv_table_rows.slice(0, 0, batch_size);
     out.mtp_rows          = frame.mtp_kv_table_rows.slice(0, 0, batch_size);
@@ -80,6 +89,9 @@ MtpRoundView slice_mtp_frame(qwen3_6::MtpDecodeState& frame, std::int32_t batch_
     out.ar_rope_positions = frame.ar_rope_positions.slice(0, 0, batch_size);
     out.ar_valid_columns  = frame.ar_valid_columns.slice(0, 0, batch_size);
     out.next_drafts       = frame.next_drafts.slice(0, 0, batch_size);
+    out.next_q_support    = frame.next_draft_q_support.slice(0, 0, batch_size);
+    out.next_q_ids        = frame.next_draft_q_ids.slice(1, 0, batch_size);
+    out.next_q_probs      = frame.next_draft_q_probs.slice(1, 0, batch_size);
     out.proposal_logits   = frame.proposal_logits.slice(1, 0, batch_size);
     out.sampling          = frame.sampling;
     return out;
@@ -106,6 +118,10 @@ TargetVerifyFrameView verify_view(const MtpRoundView& v, const GdnReplayRecords*
         .selected_hidden = v.selected_hidden,
         .replay_records  = records,
         .sampling        = v.sampling,
+        .proposals       = ops::DraftDistributionView{
+            static_cast<const std::int32_t*>(v.current_q_support.data),
+            static_cast<const std::int32_t*>(v.current_q_ids.data),
+            static_cast<const float*>(v.current_q_probs.data)},
     };
 }
 
@@ -273,6 +289,12 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
         card.set_volta_long_attention(state.execution.volta_long_attention);
 
         MtpRoundView v = slice_mtp_frame(frame, batch_size);
+        if (!state.greedy_target) {
+            // Proposal paths without a stored distribution publish one-hot drafts.
+            CUDA_CHECK(cudaMemsetAsync(frame.next_draft_q_support.data, 0,
+                                       frame.next_draft_q_support.bytes(),
+                                       state.execution.device.stream));
+        }
 
         if (state.execution.peers.empty()) {
             ops::speculative_prepare_verify_inputs(v.anchors, v.current_drafts, v.frontiers,
@@ -357,8 +379,22 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                     value.alignment_hidden, value.accepted, value.ar_hidden, ec.dev[rank]->stream);
             });
             const auto proposal_logits = field(&MtpRoundView::proposal_logits);
+            const auto propose = [&](std::int32_t step, Tensor& draft) {
+                if (state.greedy_target) {
+                    card.mtp_propose_batch(field(&MtpRoundView::ar_hidden), proposal_logits, draft);
+                    return;
+                }
+                Tensor support = v.next_q_support.slice(1, step, 1).view({batch_size});
+                Tensor ids     = v.next_q_ids.slice(2, step, 1)
+                                 .view({ops::kDraftDistributionCap, batch_size});
+                Tensor probs   = v.next_q_probs.slice(2, step, 1)
+                                   .view({ops::kDraftDistributionCap, batch_size});
+                card.mtp_propose_sample_batch(field(&MtpRoundView::ar_hidden), proposal_logits,
+                                              v.sampling, v.frontiers, step, draft, support, ids,
+                                              probs);
+            };
             Tensor draft0 = v.next_drafts.slice(1, 0, 1).view({batch_size});
-            card.mtp_propose_batch(field(&MtpRoundView::ar_hidden), proposal_logits, draft0);
+            propose(0, draft0);
             for (std::uint32_t step = 0; step + 1 < k; ++step) {
                 Tensor previous = v.next_drafts.slice(1, step, 1).view({1, batch_size});
                 Tensor next = v.next_drafts.slice(1, step + 1, 1).view({batch_size});
@@ -377,7 +413,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                 card.mtp_forward_decode_batch(previous, hidden, positions, rope, valid,
                                               field(&MtpRoundView::mtp_rows),
                                               envelopes.ar[step], hidden);
-                card.mtp_propose_batch(field(&MtpRoundView::ar_hidden), proposal_logits, next);
+                propose(static_cast<std::int32_t>(step + 1), next);
             }
         }
 

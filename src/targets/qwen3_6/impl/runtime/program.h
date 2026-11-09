@@ -207,6 +207,13 @@ struct SequenceState {
     std::uint32_t dflash_context_frontier = 0;
     std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts> mtp_drafts{};
     std::uint32_t mtp_draft_count = 0;
+    // Stored proposal distributions of mtp_drafts; support 0 marks a one-hot draft. Every
+    // assignment of mtp_drafts also assigns these supports.
+    std::array<std::int32_t, qwen3_6::kMtpDecodeMaximumDrafts> mtp_draft_q_support{};
+    std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        mtp_draft_q_ids{};
+    std::array<float, qwen3_6::kMtpDecodeMaximumDrafts * ops::kDraftDistributionCap>
+        mtp_draft_q_probs{};
     bool tail_hidden_valid        = false;
     bool retained                 = false;
     RewriteCheckpoint rewrite_checkpoint;

@@ -93,6 +93,7 @@ add_library(ninfer_ops STATIC
   ops/launcher/mtp_pack.cu
   ops/launcher/mtp_round.cu
   ops/launcher/speculative_round.cu
+  ops/launcher/proposal_sampling.cu
   ops/launcher/position.cu
   ops/launcher/prepare_ragged_prefix.cu
   ops/launcher/prepare_masked_block.cu
@@ -264,6 +265,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/mtp_pack.cpp
   ops/wrapper/mtp_round.cpp
   ops/wrapper/speculative_round.cpp
+  ops/wrapper/proposal_sampling.cpp
   ops/wrapper/position.cpp
   ops/wrapper/prepare_ragged_prefix.cpp
   ops/wrapper/prepare_masked_block.cpp

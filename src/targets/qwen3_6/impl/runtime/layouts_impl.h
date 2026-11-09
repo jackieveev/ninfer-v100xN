@@ -342,6 +342,11 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         if (plan.proposal_head == ProposalHead::Optimized && plan.tp == 1) {
             matrix(layout, DType::BF16, Variant::draft_head_rows, columns);
         }
+        if (plan.proposal_head == ProposalHead::Optimized && plan.tp == 2) {
+            matrix(layout, DType::BF16, Variant::draft_head_rows, columns);
+            scratch(layout,
+                    ops::proposal_sample_workspace_capacity_bytes(Variant::draft_head_rows, columns));
+        }
     };
     const auto mtp_stem = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens,
                               bool preembedded) {

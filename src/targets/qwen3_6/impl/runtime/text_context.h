@@ -343,6 +343,15 @@ public:
                                   const std::array<Tensor, kMaximumExecutionDevices>& mtp_hidden);
     void mtp_propose_batch(const std::array<Tensor, kMaximumExecutionDevices>& hidden,
                            const std::array<Tensor, kMaximumExecutionDevices>& logits, Tensor& draft_tokens);
+    // Samples rank-0 drafts from the proposal head's truncated distribution and stores it for
+    // exact speculative verification. Without an optimized two-rank proposal head this is the
+    // greedy proposal with support 0 (one-hot).
+    void mtp_propose_sample_batch(const std::array<Tensor, kMaximumExecutionDevices>& hidden,
+                                  const std::array<Tensor, kMaximumExecutionDevices>& logits,
+                                  const ops::SamplingConfig* configs,
+                                  const Tensor& logical_positions, std::int32_t step,
+                                  Tensor& draft_tokens, Tensor& q_support, Tensor& q_ids,
+                                  Tensor& q_probs);
     void mtp_forward_batch(const Tensor& ids, const std::array<Tensor, kMaximumExecutionDevices>& hidden,
                            const std::array<Tensor, kMaximumExecutionDevices>& positions,
                            const std::array<Tensor, kMaximumExecutionDevices>& rope_positions,

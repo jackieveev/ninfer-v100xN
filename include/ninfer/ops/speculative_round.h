@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include "ninfer/ops/proposal_sampling.h"
 #include "ninfer/ops/sampling.h"
 
 #include <cuda_runtime.h>
@@ -8,6 +9,16 @@
 #include <cstdint>
 
 namespace ninfer::ops {
+
+// Optional stored proposal distributions for the drafts of a verification round. All three
+// pointers are null (every draft one-hot) or all are device arrays: support I32 [K,B],
+// ids I32 [20,K,B] and probs FP32 [20,K,B], with the layout written by proposal_sample().
+// support[i,b] == 0 marks draft i of row b as one-hot at drafts[i,b].
+struct DraftDistributionView {
+    const std::int32_t* support = nullptr;
+    const std::int32_t* ids     = nullptr;
+    const float* probs          = nullptr;
+};
 
 // Caller-owned transient capacity for every draft-count and batch-size pair in the inclusive
 // domains. token_domain is the fixed sampling profile; invalid domains throw.
@@ -57,9 +68,12 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  *   Independently for each row b, greedy mode accepts the longest available draft prefix matching
  *   target_tokens and commits the target token at the first mismatch (or the bonus column).
  *   Sampling mode applies configs[b] to each valid verification column, accepts draft i with
- *   target probability p_i(draft_i), samples from the residual distribution on first rejection,
- *   and samples a bonus from column Pcur[b] when every available draft is accepted. The draft
- *   proposal distribution is one-hot at each greedy draft token.
+ *   probability min(1, p_i(draft_i) / q_i(draft_i)), samples from the normalized residual
+ *   max(0, p_i - q_i) on first rejection, and samples a bonus from column Pcur[b] when every
+ *   available draft is accepted. q_i is the stored proposal distribution from `proposals`, or
+ *   one-hot at draft_i when none is stored; the one-hot case accepts with p_i(draft_i) and
+ *   resamples p_i without draft_i. Either way the committed tokens follow the target
+ *   distribution exactly.
  *   RNG domains are the speculative accept/correction/bonus SamplePurpose values and logical
  *   positions derived from the old length.
  *
@@ -91,6 +105,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       Tensor& lengths, Tensor& anchors, Tensor& licensed_tokens,
                                       Tensor& licensed_counts, Tensor& accepted,
                                       std::int32_t token_domain, const SamplingConfig* configs,
+                                      const DraftDistributionView& proposals,
                                       WorkspaceArena& workspace, cudaStream_t stream);
 
 /**

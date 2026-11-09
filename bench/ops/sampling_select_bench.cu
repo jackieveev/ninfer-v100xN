@@ -249,7 +249,8 @@ void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool 
         [&](cudaStream_t stream) {
             ops::speculative_accept_greedy_drafts(ttargets, tlogits, tdrafts, textent, tlength,
                                                   ttoken, tsampled, tnum, taccepted, kTokenDomain,
-                                                  config_ptr, workspace, stream);
+                                                  config_ptr, ops::DraftDistributionView{}, workspace,
+                                                  stream);
         },
         bytes);
     const std::string label = std::string("G3 K=") + std::to_string(k) + " " +
