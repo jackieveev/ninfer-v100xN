@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <string_view>
@@ -515,19 +516,25 @@ public:
             return a.at("offset").get<std::uint64_t>() < b.at("offset").get<std::uint64_t>();
         });
 
+        // A template embedded in tokenizer_config.json is authoritative; newer converters store
+        // it only in chat_template.jinja, which is then used unchanged.
         const auto template_bytes = embedded_chat_template();
         auto template_it = std::find_if(objects.begin(), objects.end(), [](const Json& object) {
             return object.at("name") == "frontend/chat_template.jinja";
         });
-        if (template_it == objects.end() || template_bytes.size() > template_it->at("bytes").get<std::uint64_t>()) {
+        if (template_it == objects.end() ||
+            (template_bytes &&
+             template_bytes->size() > template_it->at("bytes").get<std::uint64_t>())) {
             throw ArtifactError("embedded chat template does not fit its resource allocation");
         }
-        (*template_it)["bytes"] = template_bytes.size();
+        if (template_bytes) { (*template_it)["bytes"] = template_bytes->size(); }
         V3CompatibilityDirectory result;
         result.directory = {{"identity", {{"model_id", "qwen3.8-27b"},
                                            {"weights_id", full_nvfp4 ? "nvfp4-full" : "nvfp4"}}},
                             {"objects", std::move(objects)}};
-        result.payload_overrides.emplace("frontend/chat_template.jinja", template_bytes);
+        if (template_bytes) {
+            result.payload_overrides.emplace("frontend/chat_template.jinja", *template_bytes);
+        }
         return result;
     }
 
@@ -767,7 +774,7 @@ private:
         return {file_.data() + begin, static_cast<std::size_t>(bytes)};
     }
 
-    std::vector<std::byte> embedded_chat_template() const {
+    std::optional<std::vector<std::byte>> embedded_chat_template() const {
         const auto& components = directory_.at("components");
         const auto id = require_string(
             components.at("text").at("resources").at("tokenizer_config.json"),
@@ -787,9 +794,10 @@ private:
         } catch (const Json::exception& error) {
             throw ArtifactError(std::string("invalid tokenizer_config.json: ") + error.what());
         }
+        if (!config.contains("chat_template")) { return std::nullopt; }
         const auto& value = require_string(config.at("chat_template"), "chat_template");
         const auto raw = std::as_bytes(std::span(value.data(), value.size()));
-        return {raw.begin(), raw.end()};
+        return std::vector<std::byte>(raw.begin(), raw.end());
     }
 
     const Json& directory_;

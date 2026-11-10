@@ -193,10 +193,10 @@ void validate_tokenizer_config(const FrontendResources& resources) {
         throw std::invalid_argument(
             "tokenizer_config.json does not use the official <|endoftext|> pad token");
     }
-    if (!tokenizer_config.contains("chat_template") ||
-        !tokenizer_config.at("chat_template").is_string()) {
-        throw std::invalid_argument(
-            "tokenizer_config.json.chat_template must contain the loaded chat template");
+    // Newer Hugging Face exports keep the template only in chat_template.jinja.
+    if (!tokenizer_config.contains("chat_template")) { return; }
+    if (!tokenizer_config.at("chat_template").is_string()) {
+        throw std::invalid_argument("tokenizer_config.json.chat_template must be a string");
     }
     if (tokenizer_config.at("chat_template").get_ref<const std::string&>() !=
         resources.chat_template_jinja) {
