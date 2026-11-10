@@ -559,11 +559,14 @@ private:
             const std::string prefix = "dflash2/" + suffix;
             add(old_prefix + "attention/query_key_value",
                 {prefix + "attention/query", prefix + "attention/key", prefix + "attention/value"});
-            // Context K/V are aliases of the same QKV rows, not independent parameters.
+            // Context K/V are aliases of the same QKV rows, not independent parameters. A
+            // converter may bind them to those rows or store a byte-exact standalone copy.
             for (const char* role : {"key", "value"}) {
-                if (binding_parts(prefix + "attention/context_" + role) !=
-                    binding_parts(prefix + "attention/" + role)) {
-                    throw ArtifactError(prefix + "attention/context_" + role + ": alias differs");
+                const auto alias  = prefix + "attention/context_" + role;
+                const auto source = prefix + "attention/" + role;
+                if (binding_parts(alias) != binding_parts(source) &&
+                    !materializes_row_slice(alias, source)) {
+                    throw ArtifactError(alias + ": alias differs");
                 }
             }
             add(old_prefix + "mlp/gate_up", {prefix + "mlp/gate", prefix + "mlp/up"});
@@ -584,6 +587,63 @@ private:
         const auto found = objects_.find(id);
         if (found == objects_.end()) { throw ArtifactError("missing v3 object: " + std::string(id)); }
         return *found->second;
+    }
+
+    // storage-layouts.md section 3.7: `alias` is one standalone row-split-k128-v1 object whose
+    // payload is exactly the materialized row slice that `source` binds in its parent.
+    bool materializes_row_slice(const std::string& alias, const std::string& source) const {
+        const auto& binding = directory_.at("bindings").at(alias);
+        const auto source_parts = binding_parts(source);
+        if (!binding.contains("object") || source_parts.size() != 1) { return false; }
+        const auto& copy   = object(require_string(binding.at("object"), "v3 binding object"));
+        const auto& parent = object(require_string(source_parts[0].at("object"), "v3 binding object"));
+        struct Groups { std::uint64_t group, base, high; };
+        static const std::map<std::string, Groups, std::less<>> formats = {
+            {"q4_g64_fp16", {64, 32, 0}}, {"q5_g64_fp16", {64, 32, 8}},
+            {"q6_g64_fp16", {64, 32, 16}}, {"q8_g32_fp16", {32, 32, 0}},
+        };
+        const auto found = formats.find(require_string(parent.at("format"), "v3 format"));
+        if (found == formats.end() || copy.at("format") != parent.at("format") ||
+            parent.at("layout") != "row_split_k128_v1" || copy.at("layout") != parent.at("layout") ||
+            parent.at("shape").size() != 2 || copy.at("shape").size() != 2) {
+            return false;
+        }
+        const auto [group, base_group, high_group] = found->second;
+        const auto rows = require_v3_unsigned(parent.at("shape")[0], "v3 shape dimension", true);
+        const auto k    = require_v3_unsigned(parent.at("shape")[1], "v3 shape dimension", true);
+        const auto& range = source_parts[0].at("range");
+        const auto begin = require_v3_unsigned(range[0], "v3 binding range", false);
+        const auto end   = require_v3_unsigned(range[1], "v3 binding range", true);
+        if (begin % k != 0 || end % k != 0 || end <= begin || end / k > rows ||
+            copy.at("shape") != Json::array({(end - begin) / k, k})) {
+            return false;
+        }
+        const auto groups_per_row = align_up(k, 128, "row-split K") / group;
+        const std::array<std::uint64_t, 3> row_bytes = {groups_per_row * base_group,
+                                                        groups_per_row * high_group,
+                                                        groups_per_row * 2};
+        // {base, high, scale} plane offsets and the payload size of an n-row tensor.
+        const auto geometry = [&](std::uint64_t n) {
+            const auto high_offset  = align_up(n * row_bytes[0], 256, "row-split base plane");
+            const auto scale_offset = high_offset + align_up(n * row_bytes[1], 256, "row-split high plane");
+            return std::pair{std::array<std::uint64_t, 3>{0, high_offset, scale_offset},
+                             scale_offset + n * row_bytes[2]};
+        };
+        const auto row_begin = begin / k;
+        const auto row_count = (end - begin) / k;
+        const auto [parent_offsets, parent_size] = geometry(rows);
+        const auto [copy_offsets, copy_size]     = geometry(row_count);
+        const auto parent_bytes = object_payload(parent);
+        const auto copy_bytes   = object_payload(copy);
+        if (parent_bytes.size() != parent_size || copy_bytes.size() != copy_size) { return false; }
+        std::vector<std::byte> expected(copy_bytes.size(), std::byte{0});
+        for (std::size_t plane = 0; plane < 3; ++plane) {
+            const auto from = parent_bytes.begin() +
+                              static_cast<std::ptrdiff_t>(parent_offsets[plane] + row_begin * row_bytes[plane]);
+            std::copy(from, from + static_cast<std::ptrdiff_t>(row_count * row_bytes[plane]),
+                      expected.begin() + static_cast<std::ptrdiff_t>(copy_offsets[plane]));
+        }
+        return std::equal(expected.begin(), expected.end(), copy_bytes.begin(), copy_bytes.end());
     }
 
     std::vector<Json> binding_parts(const std::string& logical) const {

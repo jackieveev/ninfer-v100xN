@@ -128,6 +128,10 @@ The adapter maps `dflash2/` bindings to `dflash/`. Attention Q/K/V resolve to th
 treating packed W8 storage as a BF16 tensor. The source convolution descriptor `[2,2,5120]`
 becomes the execution ne0-fast `[5120,2,2]` channel/tap/side view without transposing bytes.
 Source alias identities and the fixed DFlash2 configuration are validated before binding.
+`context_key`/`context_value` must either bind the same QKV parent rows as `key`/`value` or be a
+standalone `row-split-k128-v1` object byte-identical to that row slice materialized as specified in
+`storage-layouts.md` section 3.7 (the Coder390 converter stores such copies); the copies are never
+selected, so execution still reads the single packed parent.
 
 At TP2 the drafter is replicated on both ranks, proposals execute on rank 0, and the target
 verification uses the same TP2 Engine route as MTP. DFlash and MTP are mutually exclusive, as
