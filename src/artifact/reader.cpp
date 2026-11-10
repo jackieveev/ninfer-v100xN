@@ -300,9 +300,14 @@ public:
     Qwen38Nvfp4V3Adapter(const Json& directory, const MappedFile& file,
                          std::uint64_t payload_start)
         : directory_(directory), file_(file), payload_start_(payload_start) {
-        if (!directory_.is_object() || !directory_.contains("metadata") ||
-            !directory_.at("metadata").is_object() ||
-            directory_.at("metadata").value("name", "") != "qwen3.8-27b") {
+        // The converter labels derived checkpoints "qwen3.8-27b-<variant>"; the label
+        // only routes to this adapter, whose complete inventory checks decide admission.
+        const std::string name =
+            directory_.is_object() && directory_.contains("metadata") &&
+                    directory_.at("metadata").is_object()
+                ? directory_.at("metadata").value("name", "")
+                : std::string{};
+        if (name != "qwen3.8-27b" && !name.starts_with("qwen3.8-27b-")) {
             throw ArtifactError("NInfer v3 compatibility is limited to qwen3.8-27b");
         }
         if (!directory_.contains("files") || !directory_.at("files").is_array() ||

@@ -115,6 +115,9 @@ measurements of this target. The supported identities are
 `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`, `qwen3.8-27b/groupwise-int`,
 `qwen3.8-27b/nvfp4`, `qwen3.8-27b/fp8`, `qwen3.8-27b/gguf-q4-k-m`, and
 `qwen3.6-35b-a3b/groupwise-int`.
+Qwen3.8-27B v3 containers labelled `qwen3.8-27b` or `qwen3.8-27b-<variant>` (for example the
+Coder390 fine-tune converted with the official NVFP4 recipe) are admitted only through these
+identities' complete structural inventory checks; the label never selects a storage profile.
 The explicitly requested QUASAR trial adds `qwen3.8-27b/nvfp4-full`, currently restricted to
 SM70 TP2 Text/None/MTP/DFlash, TP2 image/video Vision with None/MTP, experimental TP4
 Text/None/MTP, and experimental PP2 Text/None/MTP. Vision excludes DFlash, PP2 and the fast-decode numerical profile. Vision admits the default-off

@@ -107,6 +107,12 @@ frontend. Text and MTP are verified through the public Engine route; Vision obje
 for the existing Vision route. The optional v3 DFlash2 objects are also projected and validated;
 they become GPU-resident only when DFlash is selected at Engine startup.
 
+The v3 `metadata.name` only routes a container to this adapter. It accepts `qwen3.8-27b` and the
+converter's derived labels `qwen3.8-27b-<variant>` (for example
+`qwen3.8-27b-coder390-w4a4-w8a8-mtp-dflash2`, a fine-tune converted with the official
+`qwen3_8_27b_nvfp4` recipe). Admission and the storage profile are decided by the complete
+inventory checks below, never by the label.
+
 ### 1.2 Optional v3 DFlash2 package
 
 The official v3 container supplies 66 DFlash2 objects totaling 2,226,792,960 bytes. Main feature,
@@ -132,7 +138,7 @@ file range; W8 and BF16 Ops retain their independent mathematical oracle qualifi
 ### 1.3 Full-NVFP4 v3 artifacts (QUASAR and derived checkpoints)
 
 The experimental identity `qwen3.8-27b/nvfp4-full` registers every single-file `qwen3.8-27b`
-v3 container whose complete Text inventory is full NVFP4: all 256 fused attention/GDN/MLP
+(or `qwen3.8-27b-<variant>`) v3 container whose complete Text inventory is full NVFP4: all 256 fused attention/GDN/MLP
 projections NVFP4 with paired FP32 activation divisors, and W8 token embedding/output head.
 The v3 directory lacks a weights-profile field, so the reader classifies the complete projected
 inventory, not the filename, container ID or a representative tensor. Any other inventory is
