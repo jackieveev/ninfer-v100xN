@@ -146,12 +146,12 @@ int main() {
           "TP4 CLI lost the four-rank device order");
     check_ignore_eos();
     check_documented();
-    const auto ram = parse_cli(with({"--max-context", "262144", "--ram-kv-window", "98304",
-                                    "--ram-kv-budget-bytes", "32000000000"}));
-    check(ram.ram_kv.gpu_tokens == 98304 && ram.kv_capacity.explicit_tokens == 98304 &&
-              ram.ram_kv.budget_bytes == 32000000000ULL,
-          "RAM KV did not separate logical and resident capacity");
-    check(parse_cli(base()).ram_kv.gpu_tokens == 0, "RAM KV unexpectedly enabled by default");
+    const auto memory = parse_cli(with({"--max-context", "524288", "--kvmem", "--kvmem-budget",
+                                       "65536", "--kvmem-gen-reserve", "2048"}));
+    check(memory.kvmem.budget_tokens == 65536 && memory.kvmem.gen_reserve_tokens == 2048 &&
+              memory.kv_capacity.explicit_tokens == 67584,
+          "KVMem did not separate logical and resident capacity");
+    check(!parse_cli(base()).kvmem.enabled(), "KVMem unexpectedly enabled by default");
     check_vision_budget();
     if (failures != 0) {
         std::cerr << failures << " CLI option check(s) failed\n";

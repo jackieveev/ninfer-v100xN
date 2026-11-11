@@ -1,4 +1,5 @@
 #include "serve/serve_options.h"
+#include "product/kvmem_options/kvmem_options.h"
 #include "product/speculative_options.h"
 
 #include <cerrno>
@@ -122,7 +123,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8] [--spec mtp|dflash --draft-tokens N] "
-           "[--ram-kv-window N] [--ram-kv-budget-bytes N] "
+           "[--kvmem [--kvmem-budget B] [--kvmem-gen-reserve R] [--kvmem-host-mib H] ...] [--kvmem-capabilities] "
            "[--default-max-tokens N] [--max-output-tokens N] "
            "[--vision] [--vision-device gpu|cpu] [--vision-max-tokens N] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
@@ -131,9 +132,8 @@ std::string serve_usage_text(const char* argv0) {
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --prefill-decode-rounds N: experimental decode rounds between prefill steps (1..64, default 1); larger values delay the new request's first token\n"
            "       --volta-long-attention: experimental complete-history SM70 TP2/TP4 INT8 attention (1..8 requests); floating-point output may differ\n"
-           "       --volta-fast-decode: experimental full-NVFP4 TP2/TP4 Text NVFP4 FP32 epilogues and packed MTP W8; output may differ.\n"
-           "       --ram-kv-window: experimental approximate Q/K mean-vector RAM-KV; one SM70 27B Text/MTP request, TP1/TP2/PP2\n"
-           "       RAM archive budget defaults to 32000000000 bytes (not process RSS); disabled without the window option\n"
+           "       --volta-fast-decode: experimental full-NVFP4 TP2/TP4 Text NVFP4 FP32 epilogues and packed MTP W8; output may differ.\n" +
+           product::kvmem_usage_text() +
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
            " when omitted\n"
@@ -159,7 +159,7 @@ std::string serve_usage_text(const char* argv0) {
            "       Text/None/MTP also restores RAM state checkpoints within a shared prefix\n"
            "       (up to 2 GiB active state RAM); historical branches also retain exact host KV\n"
            "       under the token budget plus a separate 2 GiB archived state cap. Suffixes are recomputed.\n"
-           "       Vision/DFlash/RAM-KV retain frontier and turn/response checkpoint reuse.\n"
+           "       Vision/DFlash/KVMem retain frontier and turn/response checkpoint reuse.\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
            "       sampler defaults come from the loaded model and resolved thinking mode; "
            "server flags and request fields override individual values.\n"
@@ -180,7 +180,7 @@ std::string serve_usage_text(const char* argv0) {
            "and raises the --max-context ceiling to --yarn-origin x --yarn-factor (at most "
            "1048576); --yarn-origin must equal the artifact\'s registered native capacity (262144) "
            "and defaults to it, --yarn-factor defaults to 4.0. YaRN works at either --tp width and "
-           "is rejected with --vision or --spec dflash.\n"
+           "is rejected with --spec dflash.\n"
            "       --no-cuda-graph runs decode eagerly. At --tp 2 that is the same two-stream "
            "forward pass with cross-device event synchronization, in place of one captured "
            "cross-device graph; it is the escape hatch if capture ever misbehaves, and it "
@@ -208,8 +208,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.help_requested = true;
         return options;
     }
+    if (argc >= 2 && std::string(argv[1]) == "--kvmem-capabilities") {
+        options.kvmem_capabilities_requested = true;
+        return options;
+    }
     if (argc < 2) { throw std::invalid_argument("artifact path is required"); }
     options.artifact_path = argv[1];
+    product::KvMemCommandLine kvmem_cli;
     for (int i = 2; i < argc; ++i) {
         const std::string arg    = argv[i];
         const auto require_value = [&](const char* flag) -> const char* {
@@ -247,12 +252,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.volta_fast_decode = true;
         } else if (arg == "--volta-long-attention") {
             options.volta_long_attention = true;
-        } else if (arg == "--ram-kv-window") {
-            options.ram_kv.gpu_tokens = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--ram-kv-window"), "ram-kv-window"));
-            if (options.ram_kv.gpu_tokens == 0) { throw std::invalid_argument("RAM KV window must be positive"); }
-        } else if (arg == "--ram-kv-budget-bytes") {
-            options.ram_kv.budget_bytes = parse_u64(require_value("--ram-kv-budget-bytes"), "ram-kv-budget-bytes");
+        } else if (kvmem_cli.parse(arg, require_value)) {
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
@@ -400,9 +400,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument("unknown argument: " + arg);
         }
     }
+    options.kvmem = kvmem_cli.resolve();
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(
-            options.ram_kv.gpu_tokens != 0 ? options.ram_kv.gpu_tokens : options.max_context);
+            options.kvmem.enabled() ? options.kvmem.window_tokens() : options.max_context);
     }
     if (devices_explicit) {
         if (options.devices.size() != static_cast<std::size_t>(options.tp * options.pp)) {
@@ -419,7 +420,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--port must be in [1,65535]");
     }
     if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
-    if (options.ram_kv.gpu_tokens == 0 && options.kv_capacity.mode == KvCapacityMode::Explicit &&
+    if (!options.kvmem.enabled() && options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }

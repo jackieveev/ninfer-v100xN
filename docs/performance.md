@@ -2,7 +2,7 @@
 
 Local hardware: 2 × Tesla V100-SXM2 16 GB, SXM2-to-PCIe adapters, PCIe 3.0 ×16 P2P without NVLink, CUDA 12.8 / SM70. Decode rates count committed tokens, excluding rejected drafts. Context capacity and occupied input length are reported separately. Loading and CUDA Graph priming are outside request timing.
 
-[llama.cpp / LM Studio controls](llama-comparison.md) · [Other V100 profiles](performance-v100.md) · [TP4/NVLink](tp4.md) · [RAM-KV/PP2](experiments.md) · [Inherited upstream campaigns](performance-upstream.md)
+[llama.cpp / LM Studio controls](llama-comparison.md) · [Other V100 profiles](performance-v100.md) · [TP4/NVLink](tp4.md) · [KVMem/PP2](experiments.md) · [Inherited upstream campaigns](performance-upstream.md)
 
 ## TP2 PCIe sampled MTP and Split-D prefill (2026-11-09)
 
@@ -1322,7 +1322,7 @@ comparisons, not universal source-model quality.
 
 The optional `--volta-long-attention` flag is startup-fixed and defaults off.
 It supports SM70 27B TP2/PP1, one Text/None/MTP request and complete INT8 KV;
-Vision, RAM-KV and DFlash are excluded. Above 16390 keys it selects FP32 PV
+Vision and DFlash are excluded. Above 16390 keys it selects FP32 PV
 accumulation for one/five/six-query paths. In this earlier campaign, one/six-query kernels use eight-row
 QPN tiles and 32-key online-softmax updates; five-query verification combines
 sixteen keys per update. Above 65536 keys those widths target about 1072

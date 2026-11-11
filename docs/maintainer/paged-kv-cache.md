@@ -27,7 +27,7 @@ Op 的状态效果、kernel 寻址约束和性能准入条件。具体 allocator
 
 ### 1.1 Non-goals
 
-- request preemption、swap 或跨 GPU storage；默认完整注意力路径不 offload，显式 RAM-KV 实验见 §15；
+- request preemption、swap 或跨 GPU storage；默认完整注意力路径不 offload，显式 KVMem 实验见 §15；
 - active requests 之间共享可写 prefix、page reference counting 或 copy-on-write branching；
 - 在每个任意 token 边界零重算的 longest-common-prefix reuse（有界完整状态检查点见 §10）；
 - 用一个 universal raw-byte allocator 在 serving 期间动态重分不同 KV layouts 的显存；
@@ -107,7 +107,7 @@ selected speculative backend off、MTP 或 DFlash
 用户配置，而由 resolved Main capacity、selected backend、`max_concurrency` 和 exact target frontier
 contract 唯一导出。
 
-默认完整注意力 Planner 将 Main contract 归一化为 physical page capacity（RAM-KV 例外见 §15）：
+默认完整注意力 Planner 将 Main contract 归一化为 physical page capacity（KVMem 例外见 §15）：
 
 ```text
 L     = ceil(S / P_main)
@@ -753,7 +753,7 @@ Qwen3.6 retained sequence 包含：
 
 - current resume frontier；
 - 一份有效时的 typed rewrite checkpoint，其 kind 为 `TurnClosure` 或 `ResponseReplay`；
-- 普通 Text/None/MTP 的有界 RAM prefix checkpoints（Vision、DFlash、稀疏 RAM-KV 不启用）。
+- 普通 Text/None/MTP 的有界 RAM prefix checkpoints（Vision、DFlash、KVMem 不启用）。
 
 每个 checkpoint 都必须同时描述：
 
@@ -852,7 +852,7 @@ KV，以免把不同浮点关联结果混为同一状态。部分尾块重新导
 先移除旧分枝的内部检查点，仍不够则淘汰最旧分枝；当前 lanes 的 images 仍受独立2 GiB预算限制。
 QUASAR INT8-G64 的384K主KV加MTP约12.8 GiB主机RAM；按1M tokens折算约33.4 GiB，此外还有状态、元数据和传输期间的临时所有权。
 这不是 RSS 硬上限。已选择的 plan 持有恢复资源直到 admission 完成，预算淘汰不会使其悬空。
-Vision、DFlash、稀疏 RAM-KV 不进入此缓存。此传输不改 codec 或重算 GDN，但不同 suffix/prefill
+Vision、DFlash、KVMem 不进入此缓存。此传输不改 codec 或重算 GDN，但不同 suffix/prefill
 分块可能改变浮点关联；不能声称与不同 schedule 的 cold full-prefill 输出逐位一致。
 
 ---
@@ -1496,47 +1496,41 @@ contiguous-KV reference 只记录当时的 `B=1` paging migration，不是当前
 改变 `P`、pool grouping、page ID model 或 closed pool orders 都是 architecture contract 变更，不属于
  kernel tuning。任何实现都不能在 kernel 内暗中建立第三套 storage contract。
 
-## 15. Optional native RAM-KV experiment
+## 15. Optional KVMem experiment
 
-`EngineOptions.ram_kv.gpu_tokens>0` 显式启用近似模式，默认关闭。现在是 training-free **Q/K
-mean-vector retrieval**，参考外部 KVMem。仅支持 SM70 的 27B、TP1/TP2/PP2、单请求
-Text/None/MTP；Vision、DFlash、TP4、35B-A3B 不支持此模式，其默认路径不变。
+`EngineOptions.kvmem.budget_tokens>0`（产品参数 `--kvmem --kvmem-budget N`）显式启用 vendored
+[KVMem](https://github.com/kvmem/kvmem) core（`third_party/kvmem`，backend 名 `ninfer-v100`），默认关闭。
+仅支持 SM70 27B、TP1/TP2、PP1、单请求 Text/Vision、None/MTP；DFlash、TP4、PP2、35B-A3B 拒绝。
+`--volta-long-attention`、`--volta-fast-decode`、YaRN 和 Vision 可同时启用。这是近似注意力
+（长 prefill 期间也是），不是完整历史的语义等价。
 
-逻辑容量仍为 `max_context`。`kv_capacity` 必须显式等于 GPU window；此时 Main 的最小/最大 physical
-page count 均为 `window/64`，不再要求 `kv_capacity>=max_context`。window 必须为 64 的倍数、至少
-`prefill_chunk+8192`（PP2: `prefill_chunk*pipeline_chunks+8192`），且不超过逻辑容量。MTP 按原有 draft lead 增加 physical headroom，request
-entitlement 不超过其 logical page capacity。GPU workspace 同样按 resident attention ceiling 规划。
+逻辑容量为 `max_context`（可经 YaRN 超过 262144）；GPU Main 页数固定为 window/64，window =
+`budget + gen_reserve`，且 `kv_capacity` 必须等于 window（serve/CLI 未显式给出时自动取 window）。
+budget 至少 128 且为 64 的倍数，gen reserve 至少为 prefill chunk。每个 allocation 独占匿名 RAM
+archive，按实际 K/V/code/scale planes 规划；`max_context` 的 packed archive 必须不超过
+`--kvmem-host-mib`。archive 只保存/恢复原始 packed bytes，不反量化、不重新量化；该上限不是进程
+RSS 限制。KVMem graph propagation、disk tier、sessions 与 layerwise recall 未接入，非零
+`--kvmem-graph-alpha` 等参数在解析时拒绝。
 
-每个 allocation 独占一个匿名 RAM archive，按 actual K/V/code/scale planes 规划，不为 GDN 层分配
-虚构 KV。保存/恢复是原始 packed bytes 的逐页复制；不反量化、不重新量化。预算
-`ram_kv.budget_bytes` 检查全部 ranks 的最大 archive bytes，默认十进制 32 GB，**不是进程 RSS
-限制**；整个服务器的硬预算需另用 cgroup，评测工具设置 MemoryMax=32000000000、swap=0。
+KVMem block 等于一个 64-token page。每个完整页写入后，family 从 cache 解码 K，逆 text RoPE
+（Vision 页再加该页 MRoPE offset）得到 pre-RoPE page Mean-K，送入 `RawKvStore`；媒体页不计算
+统计并始终驻留。Prompt 最后 chunk 先预览捕获最后至多 512 行 pre-RoPE Q，恢复 GDN 状态后重跑；
+`PageSoftmaxCuda`（或 cosine）给页打分，`pick_scored_blocks` 在 sink/recent/media/required span
+之外按分数填满 budget。Prefill 超过窗口时用 `pick_prefill_pressure_blocks`；decode 期间按
+KVMem 策略复用最近一次查询排序。Core 只返回页集合；`PagedKVAllocation::select_pages(selected,
+pinned_from)` 负责搬页：相同页集合不搬移，未选中页从 GPU 淘汰到 archive，选中冷页从 archive 调入。
 
-`tools/v100/bench_ram_kv.py --ram-budget-bytes N` 设置 archive 上限，
-`--process-memory-limit-bytes N` 独立设置整进程 cgroup 上限，两者均默认 32000000000。
-提高 archive 上限不会扩大参与注意力的历史；召回预算由 `--window`（产品参数
-`--ram-kv-window`）控制，扩大它会增加 GPU 显存与 attention 工作量。实际占用低于 window
-时不会淘汰历史，但检索索引和页表维护仍可能产生开销。
+写表仍为 original logical page -> physical page；读表把 chronological resident index 映射到
+physical page。GQA 的私有 I32 position remap（ordinary 与 long attention 都经过）只用于 KV
+寻址/因果遮罩；Q/K 与 RoPE 保持 original positions，未选中 key 不参与 softmax。所有 query/write
+pages 必须驻留，metadata 在执行期间冻结，decode graph 不保存 host archive 指针。
 
-Family 用未旋转 K 的 128-token 块均值与当前 user-query Q 做余弦排序。K 从原始 BF16/INT8
-packed page 解码并逆旋转，仅生成检索索引，不改变注意力里的 packed bytes。Core 仅消费
-page ranking，优先保留全部当前 append pages、最近 4096 tokens、512-token sink，随后按排序填充窗口。
-长 prefill 每 8K token 刷新一次，末尾 query 预跑捕获 Q 后恢复 GDN 状态再重跑；相同页集合不搬移
-resident payload，不在 decode graph 中保存 host archive pointers。新 query 可以从 RAM 重新调入冷页。
-Prefill 超过窗口时也会淘汰，
-因此它不是只改变 decode 的完整语义缓存。
+Main/MTP/peer archives 各自拥有，页操作同序执行。MTP provisional tail 由原始 token frontier
+遮罩，回滚按 logical extent 截断 KVMem catalog 与统计。Prefix reuse 仍要求完整 GDN checkpoint；
+近似模式复用已有近似状态，不保证与 cold rerun 一致。
 
-写表继续用 original logical page -> physical page；`read_indices` 将 original logical page 映射到
-chronological resident index，`read_tables` 将其映射到 physical page。GQA 的私有 I32 position remap
-只用于 KV 寻址/因果遮罩；已计算的 Q/K 和 RoPE 保持 original positions。排序保证 compact key<=query
-等价于选中集合内 original key<=query，未选中的 key 不参与 softmax。所有 query/write pages 必须
-驻留，metadata 在执行期间冻结。A2 原始写入和 A1 compact 写入指向同一 physical bytes。
-
-Main/MTP/peer archives 各自拥有，页操作同序执行。MTP provisional tail 受原始 token frontier 遮罩，
-回滚按 logical extent 截断，不把 resident page count 当作 logical frontier。Prefix reuse 仍要求完整
-GDN continuation checkpoint；近似模式复用已有近似状态，不保证与新 query ranking 的 cold rerun
-一致。不能用 KV 字节无损、identity-window parity 或九项 QA 正确声称普遍不降智。
-
-资格检查包括 exact code/scale eviction/reload、FP64 Q/K mean/cosine and selected-key attention oracle、原始因果位置与
-future-column masking、真实 Engine Text/MTP/prefix。长测结果按实际占用、窗口、committed decode、
-prefill、缓存命中、质量和整进程内存分别报告；外部 llama.cpp 结果不是原生实现的速度证据。
+资格检查：`ninfer_kv_retrieval_test`（exact query-row capture、FP64 page Mean-K oracle、
+`select_pages` archive roundtrip、ordinary/long sparse attention 对 FP64 oracle）与
+`NINFER_KVMEM_REAL_WEIGHTS=... ctest -R '^ninfer_kvmem_real_test$'`（未受压窗口 parity、受压
+mid-archive 召回、MTP commit、prefix reuse）。长测按实际占用、budget、committed decode、prefill、
+缓存命中、召回与整进程内存分别报告，见 [experiments](../experiments.md)。

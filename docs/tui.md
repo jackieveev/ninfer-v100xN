@@ -80,7 +80,7 @@ keep model/request defaults. The native context ceiling is 262144; no implicit Y
 controls `--vision-max-tokens`. Turning Vision on/off requires stopping and restarting the child.
 The same QUASAR v3 artifact contains both Text and Vision; off omits all Vision GPU payloads.
 The Vision preset keeps prefix reuse and numerical experiments off initially. Turning Vision on
-only disables fast decode and RAM-KV; long attention may stay enabled. A 1024 visual
+only disables fast decode; long attention and KVMem may stay enabled. A 1024 visual
 budget suffices for the chart image; the bundled five-second video requires 4096 in the tested
 98K-capacity profile. This budget is independent of text context and aggregate across request media.
 
@@ -108,14 +108,14 @@ The C++ server remains the authority for artifact identity, admission and availa
 NVFP4/QUASAR Text/None/MTP; no Vision, DFlash or either numerical experiment. PP prefill chunks
 are 1..8. There is no established local speed gain to advertise.
 
-`Experimental RAM-KV` is default-off approximate attention, including during long prefill.
-The GPU window replaces `--kv-capacity` while enabled; it must be a multiple of 64, at most the
-logical context, and at least `chunk+8192` (`chunk*pipeline_chunks+8192` under PP2).
-It supports single-request Text/None/MTP on TP1/TP2/PP2, excluding Vision, DFlash, TP4 and long
-attention. RAM archive bytes default to 32000000000 and do **not** impose a process RSS limit.
-Unretrieved history does not participate in attention, so long-context quality may fall. The
-current combination has no applicable speed/GPQA result. `i` labels these limits; see
-[RAM-KV semantics](maintainer/paged-kv-cache.md#15-optional-native-ram-kv-experiment).
+`KVMem long-context memory` is default-off approximate attention, including during long prefill.
+The GPU window `KVMem budget tokens + KVMem gen reserve` replaces `--kv-capacity` while enabled;
+budget is a multiple of 64 and at least 128, reserve is a multiple of 64 and at least the prefill
+chunk, and the window is at most the logical context. It supports single-request Text/Vision
+None/MTP on TP1/TP2 with long attention and fast decode, excluding DFlash, TP4 and PP2.
+`KVMem host archive MiB` bounds the packed archive and does **not** impose a process RSS limit.
+Unretrieved history does not participate in attention, so long-context quality may fall; see
+[KVMem semantics](maintainer/paged-kv-cache.md#15-optional-kvmem-experiment).
 
 Explicit paths and command-only mode:
 
@@ -145,7 +145,7 @@ The recommended default is **384,000 unique page-rounded Main Text tokens**; `0`
 only current GPU-prefix reuse. Historical Text/None/MTP branches retain exact packed KV and
 complete GDN/tail state in RAM, evicting the oldest saved branch first. QUASAR TP2 INT8 KV
 needs up to about **12.8 GiB RAM** for the 384K default main+MTP tokens (about 33.4 GiB at 1M), plus bounded state images and
-transfer headroom. This is not a process RSS cap. Vision, DFlash and sparse RAM-KV are excluded.
+transfer headroom. This is not a process RSS cap. Vision, DFlash and KVMem are excluded.
 Long attention admits experimental startup-fixed concurrency **1–8**; all independent requests
 share the GPU KV pool, so configured concurrency does not guarantee that many long prompts
 can run simultaneously. See [concurrency measurements](performance.md#experimental-long-context-concurrency-2026-10-20).

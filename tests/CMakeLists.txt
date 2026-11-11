@@ -319,7 +319,7 @@ ninfer_add_test(ninfer_serve_options_test
 # compiled in directly because apps/ninfer is an executable, not a library.
 ninfer_add_test(ninfer_rope_cli_test
   SOURCES test_rope_cli.cpp ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
-  LIBRARIES ninfer_serve ninfer_engine)
+  LIBRARIES ninfer_serve ninfer_engine ninfer_product_kvmem_options)
 target_include_directories(ninfer_rope_cli_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 # Host-only: no artifact, no device. The CLI stop-policy and diagnostic option surface that the rope
 # test does not cover -- principally `--ignore-eos`, whose default decides whether a request honors
@@ -327,7 +327,7 @@ target_include_directories(ninfer_rope_cli_test PRIVATE ${PROJECT_SOURCE_DIR}/ap
 # library.
 ninfer_add_test(ninfer_cli_options_test
   SOURCES test_cli_options.cpp ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine ninfer_product_kvmem_options)
 target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 ninfer_add_test(ninfer_request_log_test
   SOURCES test_request_log.cpp
@@ -345,7 +345,7 @@ ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
           ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b/ninfer_bench_support.cpp
   NEEDS_SOURCE_DIR
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine ninfer_product_kvmem_options)
 target_include_directories(ninfer_bench_support_test PRIVATE ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b)
 
 # Shared Op numerical tests. Target-composed schedule tests are registered separately below.
@@ -446,13 +446,13 @@ ninfer_add_op_test(ninfer_mtp_split_test
 ninfer_add_op_test(ninfer_gqa_attention_test
   SOURCES ops/test_gqa_attention.cpp
   LIBRARIES ninfer_ops)
-ninfer_add_op_test(ninfer_ram_kv_test
-  SOURCES ops/test_ram_kv.cpp
+ninfer_add_op_test(ninfer_kv_retrieval_test
+  SOURCES ops/test_kv_retrieval.cpp
   LIBRARIES ninfer_ops)
-ninfer_add_test(ninfer_ram_kv_real_test
-  SOURCES targets/qwen3_6_27b/test_ram_kv_real.cpp
+ninfer_add_test(ninfer_kvmem_real_test
+  SOURCES targets/qwen3_6_27b/test_kvmem_real.cpp
   LIBRARIES ninfer_engine)
-set_tests_properties(ninfer_ram_kv_real_test PROPERTIES TIMEOUT 1200 SKIP_RETURN_CODE 77)
+set_tests_properties(ninfer_kvmem_real_test PROPERTIES TIMEOUT 1200 SKIP_RETURN_CODE 77)
 ninfer_add_op_test(ninfer_gdn_tp4_test
   SOURCES ops/test_gdn_tp4.cpp
   LIBRARIES ninfer_ops)

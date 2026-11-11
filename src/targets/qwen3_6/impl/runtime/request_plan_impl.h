@@ -107,7 +107,7 @@ ProgramImplCore::plan_request_base(const PreparedPromptData& prompt,
     base->sampling                       = translate_sampling(options.sampling);
     base->allow_prefix_reuse             = options.allow_prefix_reuse;
     base->capture_prefix_checkpoints = options.allow_prefix_reuse && prompt.identity.reusable &&
-        !prompt.has_media() && ram_kv.gpu_tokens == 0 &&
+        !prompt.has_media() && !kvmem.enabled() &&
         speculative_backend != SpeculativeBackend::DFlash &&
         prefix_checkpoint_bytes() <= kPrefixCheckpointBudget / max_concurrency;
     const std::uint32_t reserved_context_tokens =
@@ -122,7 +122,7 @@ ProgramImplCore::plan_request_base(const PreparedPromptData& prompt,
     } else if (speculative_backend == SpeculativeBackend::DFlash && backend_kv_cache() != nullptr) {
         base->backend_kv_page_entitlement = pages_for_tokens(reserved_context_tokens);
     }
-    if (ram_kv.gpu_tokens != 0) {
+    if (kvmem.enabled()) {
         base->text_kv_page_entitlement = decoder->text_kv.pool().page_group_count();
         base->backend_kv_page_entitlement = decoder->mtp_cache() != nullptr
             ? std::min(decoder->mtp_cache()->pool().page_group_count(), pages_for_tokens(capacity)) : 0U;
@@ -222,7 +222,7 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
         }
         // A shorter/edited prompt can still claim any retained complete state image.
         // Prefer the longest matching frontier, not the checkpoint's original purpose.
-        if (!prompt.has_media() && ram_kv.gpu_tokens == 0 &&
+        if (!prompt.has_media() && !kvmem.enabled() &&
             speculative_backend != SpeculativeBackend::DFlash) {
             for (const auto& checkpoint : sequence.prefix_checkpoints) {
                 if (checkpoint.frontier > plan->reuse_base &&

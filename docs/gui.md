@@ -73,7 +73,7 @@ bash tools/v100/ninfer-gui.sh \
 “推理”页默认只显示“上下文容量”，KV 自动跟随它。旁边的“独立 KV”展开后可填写单独的整数
 或 `auto`；手动整数不得小于上下文容量，`auto` 表示按可用显存选择。收起会清除独立值并恢复
 跟随，保存配置时也记录为跟随。加载包含独立值的配置时自动展开，避免隐藏生效的设置。
-展开区显示当前手动 KV 的最低值。RAM-KV 实验启用后使用实验页的 GPU window，保留普通设置。
+展开区显示当前手动 KV 的最低值。KVMem 启用后 KV 容量等于实验页的预算 + 生成预留，保留普通设置。
 报错、确认及配置对话框使用与主窗口一致的浅色主题。
 
 顶部“配置”是唯一的配置入口，管理用户命名配置：
@@ -109,7 +109,7 @@ bash tools/v100/ninfer-gui.sh \
 目前覆盖注册的 27B v2 和已支持的 Qwen3.8 v3 目录。预估按每张卡分别显示：
 
 - 权重：按 TP 分片、复制的 embedding/小控制张量、PP 层归属和可选 MTP/DFlash/Vision 筛选。
-- KV：按64-token页对齐的预留容量，区分 INT8-G64/BF16、MTP headroom 和 RAM-KV GPU window。
+- KV：按64-token页对齐的预留容量，区分 INT8-G64/BF16、MTP headroom 和 KVMem GPU window。
   并发请求共享这份容量，不将整个 KV pool 再乘以并发数。
 - 状态、工作区、Graph 与 CUDA 开销：按固定模型形状计算或给出估算区间。
 
@@ -142,11 +142,11 @@ bash tools/v100/ninfer-gui.sh \
 图片测试用 180K 文本容量、1024 视觉预算；现有五秒视频测试用 98K 容量、4096 视觉预算。
 较小预算可能拒绝视频。开关和预算会保存，重启 API 后生效。
 
-勾选视觉会关闭 fast decode、RAM-KV 及前缀复用，但可保留 long attention；可手动重新启用缓存。QUASAR 的 TP2 / MTP4 /
+勾选视觉会关闭 fast decode 及前缀复用，但可保留 long attention 和 KVMem；可手动重新启用缓存。QUASAR 的 TP2 / MTP4 /
 4096 容量现有前缀集成检查已通过，包括视觉桥接、媒体变化/追加、停止和恢复。TP4、DFlash、Q4_K_M 和 native FP8 的不支持组合在启动前被阻止。
 GUI 是 API 启动器；图片/视频由客户端通过既有 OpenAI/Anthropic 接口传入。
 
-加载命名配置会替换完整参数，包括视觉、数值实验、RAM-KV、采样和网络设置；API key 保留在
+加载命名配置会替换完整参数，包括视觉、数值实验、KVMem、采样和网络设置；API key 保留在
 当前会话。运行期间锁定参数及配置加载；先停止服务再编辑，
 或使用“重启”按当前配置重新启动。“日志 → 保存日志”可导出窗口内的服务日志。
 自己的子进程只有输出 API 监听信息后才显示运行就绪，提前返回的 `/health` 不代表模型加载完成。
@@ -175,13 +175,13 @@ logits/接受计数与提交前沿检查均通过；这些检查不等于质量�
 “实验 PP”提供已有 `--pp 2` 路径：选择 TP1、填写两个设备 ID、并发1、纯文本 None/MTP；
 “PP prefill chunks”范围 1–8。它不支持视觉、DFlash 和上述两个数值实验，没有确定的本机速度增幅。
 
-“实验 RAM-KV”提供已有近似历史检索路径，默认关闭。启用时 `--kv-capacity` 自动等于 GPU token
-窗口，暂存的普通 KV 容量设置不变；关闭后恢复普通完整 KV 配置。窗口须为64倍数，不超过逻辑
-上下文，至少为 `prefill_chunk+8192`（PP2 为 `prefill_chunk*pipeline_chunks+8192`）。
-预算是 RAM archive 字节数，默认 32000000000，**不是进程 RSS 上限**。仅单请求 Text/None/MTP、
-TP1/TP2/PP2，排斥视觉、DFlash、TP4、长注意力。它在长 prefill 和 decode 都可能舍弃未检索历史，
-因此可能降低长上下文质量；没有可直接套用到当前组合的速度或 GPQA 数据。
-模型与硬件最终准入仍由 C++ Engine 验证，详见 [RAM-KV 语义](maintainer/paged-kv-cache.md#15-optional-native-ram-kv-experiment)。
+“KVMem 长上下文记忆”接入 [KVMem](https://github.com/kvmem/kvmem) 块稀疏检索，默认关闭。启用时
+`--kv-capacity` 自动等于预算 + 生成预留，暂存的普通 KV 容量设置不变；关闭后恢复普通完整 KV 配置。
+预算须为64倍数且至少128，生成预留须为64倍数且不小于 prefill chunk，二者之和不超过逻辑上下文。
+主机归档 MiB 限制打包 KV archive，**不是进程 RSS 上限**。支持单请求 Text/视觉 None/MTP、TP1/TP2，
+可与长注意力、fast decode 同开；排斥 DFlash、TP4、PP2。它在长 prefill 和 decode 都可能舍弃
+未检索历史，因此可能降低长上下文质量。
+模型与硬件最终准入仍由 C++ Engine 验证，详见 [KVMem 语义](maintainer/paged-kv-cache.md#15-optional-kvmem-experiment)。
 
 ## 远程主机
 
@@ -228,7 +228,7 @@ Responses 使用 `usage.input_tokens_details.cached_tokens`，Anthropic Messages
 普通 Text/MTP 请求还会在 RAM 中保存有界的完整循环状态检查点。下一次输入较短或
 只修改后半段时，可恢复公共前缀内最近的检查点，再重算余下部分；命中数只计真正
 跳过计算的 token，不把重算部分算进缓存。首次建立检查点需要分配和传输 RAM 数据，
-会增加 prefill 耗时；后续请求复用已有缓冲。DFlash、视觉和 RAM-KV 仍使用原有的
+会增加 prefill 耗时；后续请求复用已有缓冲。DFlash、视觉和 KVMem 仍使用原有的
 完整 frontier / turn / response 检查点规则。
 
 历史分枝缓存的预算在“推理 → 历史缓存预算 / tokens”设置，随命名配置保存/加载。
@@ -239,7 +239,7 @@ Responses 使用 `usage.input_tokens_details.cached_tokens`，Anthropic Messages
 预算按 Main Text 的64-token页取整，不是进程内存上限：QUASAR TP2 INT8 KV 的384K预算，
 主 KV 加 MTP 最多约 **12.8 GiB RAM**；按1M tokens折算约33.4 GiB，还需完整状态检查点
 及恢复时的临时余量。
-恢复到有完整状态的最近前缀，其后需要重算的 token 不算命中。Vision、DFlash 和稀疏 RAM-KV
+恢复到有完整状态的最近前缀，其后需要重算的 token 不算命中。Vision、DFlash 和 KVMem
 不使用此历史分枝缓存。[所有权与预算](maintainer/paged-kv-cache.md#104-historical-branches)。
 
 ## CPU 视觉塔（0.1.2）
@@ -248,7 +248,7 @@ Responses 使用 `usage.input_tokens_details.cached_tokens`，Anthropic Messages
 媒体编码结束后上传 BF16 特征；显存区间不再计入塔权重/编码工作区，但仍计 GPU 特征缓冲。
 下方同时显示 CPU 塔权重 RAM 估计，另需媒体工作区与已有缓存 RAM。选项支持设置和配置保存/加载。
 图片/视频会更慢，其他已入队请求可继续解码。CPU 与 GPU 计算的数值差异可能改变输出，未跑新 GPQA。
-开启视觉只自动关闭 fast decode 和 RAM-KV，不再关闭 long attention；该长注意力实验仍默认关闭。
+开启视觉只自动关闭 fast decode，不再关闭 long attention 和 KVMem；该长注意力实验仍默认关闭。
 
 CPU 视觉模式下，启动器将 API 的媒体准备/排队超时设为 600000 ms（10 分钟）；
 命令行直接启动服务时，大图或视频需自行提高 `--pending-timeout-ms`，默认 30 秒可能不够。

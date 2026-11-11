@@ -15,7 +15,8 @@ std::uint32_t page_count(std::uint32_t capacity) {
 PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std::uint32_t capacity,
                               std::int32_t kv_heads, std::int32_t head_dim, DType dtype,
                               std::int32_t quant_group, std::int32_t table_rows,
-                              std::uint32_t physical_page_groups, bool ram_kv) {
+                              std::uint32_t physical_page_groups, bool ram_archive,
+                              bool retrieval) {
     if (layers == 0 ||
         layers > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
         kv_heads <= 0 || head_dim <= 0 || table_rows <= 0) {
@@ -28,7 +29,7 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
     }
 
     const std::uint32_t logical_pages = page_count(capacity);
-    if (!ram_kv && physical_page_groups < logical_pages) {
+    if (!ram_archive && physical_page_groups < logical_pages) {
         throw std::invalid_argument("Paged KV physical pages are below logical capacity");
     }
 
@@ -36,7 +37,7 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
     pool_spec.page_group_count      = physical_page_groups;
     pool_spec.logical_page_capacity = logical_pages;
     pool_spec.table_rows            = table_rows;
-    pool_spec.ram_enabled           = ram_kv;
+    pool_spec.ram_enabled           = ram_archive;
     pool_spec.planes.reserve(static_cast<std::size_t>(layers) * (quantized ? 4ULL : 2ULL));
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         pool_spec.planes.push_back({dtype, head_dim, kv_heads, 256});
@@ -55,17 +56,14 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
         .dtype       = dtype,
         .quant_group = quant_group,
     };
-    if (ram_kv) {
-        layout.retrieval_keys = builder.add_tensor(DType::FP32,
-            {head_dim, kv_heads, static_cast<int>(logical_pages), static_cast<int>(layers)}, 256, "retrieval K");
-        layout.retrieval_query = builder.add_tensor(DType::FP32,
-            {head_dim, kv_heads, static_cast<int>(layers)}, 256, "retrieval Q");
-        layout.retrieval_fallback = builder.add_tensor(DType::FP32,
-            {head_dim, kv_heads, static_cast<int>(layers)}, 256, "retrieval fallback Q");
-        layout.retrieval_counts = builder.add_tensor(DType::I32, {static_cast<int>(layers)}, 256, "retrieval counts");
-        layout.retrieval_span = builder.add_tensor(DType::I32, {2}, 256, "retrieval span");
-        layout.retrieval_scores = builder.add_tensor(DType::FP32,
-            {static_cast<int>((logical_pages + 1) / 2)}, 256, "retrieval scores");
+    if (retrieval) {
+        layout.retrieval_rows = builder.add_tensor(DType::BF16,
+            {head_dim, kv_heads * 6, kKvMemQueryRows, static_cast<int>(layers)}, 256, "KVMem query rows");
+        layout.retrieval_span = builder.add_tensor(DType::I32, {2}, 256, "KVMem query span");
+        layout.retrieval_means = builder.add_tensor(DType::FP32,
+            {head_dim, kv_heads, kKvMemSummaryPages, static_cast<int>(layers)}, 256, "KVMem page means");
+        layout.retrieval_offsets = builder.add_tensor(DType::I32, {kKvMemSummaryPages}, 256,
+                                                      "KVMem page RoPE offsets");
     }
     return layout;
 }
@@ -76,11 +74,13 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
     DecoderStateLayout layout;
     layout.text_kv = plan_cache(builder, spec.full_attention_layers, spec.capacity, spec.kv_heads,
                                 spec.attention_head_dim, spec.kv_dtype, spec.kv_quant_group,
-                                spec.kv_table_rows, spec.text_physical_page_groups, spec.ram_kv);
+                                spec.kv_table_rows, spec.text_physical_page_groups, spec.kvmem,
+                                spec.kvmem);
     if (spec.enable_mtp) {
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
                                    spec.attention_head_dim, spec.kv_dtype, spec.kv_quant_group,
-                                   spec.kv_table_rows, spec.mtp_physical_page_groups, spec.ram_kv);
+                                   spec.kv_table_rows, spec.mtp_physical_page_groups, spec.kvmem,
+                                   false);
     }
     layout.linear_attention = plan_linear_attention_state_pool(builder, spec.linear_attention);
     return layout;
@@ -90,16 +90,13 @@ PagedKVCache::PagedKVCache(DeviceSpan backing, const PagedKVCacheLayout& layout)
     : pool_(backing, layout.pool), layers_(layout.layers), max_context_(layout.max_context),
       kv_heads_(layout.kv_heads), head_dim_(layout.head_dim), dtype_(layout.dtype),
       quant_group_(layout.quant_group) {
-    if (layout.pool.spec.ram_enabled) {
-        retrieval_keys = layout.retrieval_keys.bind(backing);
-        retrieval_query = layout.retrieval_query.bind(backing);
-        retrieval_fallback = layout.retrieval_fallback.bind(backing);
-        retrieval_counts = layout.retrieval_counts.bind(backing);
+    if (layout.retrieval_rows.region.bytes != 0) {
+        retrieval_rows = layout.retrieval_rows.bind(backing);
         retrieval_span = layout.retrieval_span.bind(backing);
-        retrieval_scores = layout.retrieval_scores.bind(backing);
-        CUDA_CHECK(cudaMemset(retrieval_counts.data, 0, retrieval_counts.bytes()));
-        CUDA_CHECK(cudaMemset(retrieval_query.data, 0, retrieval_query.bytes()));
-        CUDA_CHECK(cudaMemset(retrieval_fallback.data, 0, retrieval_fallback.bytes()));
+        retrieval_means = layout.retrieval_means.bind(backing);
+        retrieval_offsets = layout.retrieval_offsets.bind(backing);
+        CUDA_CHECK(cudaMemset(retrieval_rows.data, 0, retrieval_rows.bytes()));
+        CUDA_CHECK(cudaMemset(retrieval_span.data, 0, retrieval_span.bytes()));
     }
 }
 

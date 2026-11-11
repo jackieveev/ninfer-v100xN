@@ -23,6 +23,15 @@ ServeOptions parse(std::vector<std::string> arguments) {
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
 }
 
+bool rejects(std::vector<std::string> arguments) {
+    try {
+        (void)parse(std::move(arguments));
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -292,12 +301,28 @@ int main() {
     failures += check(!secret_present, "startup argv retained the API key");
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
-    const auto ram = parse({"ninfer-serve", "model.ninfer", "--max-context", "262144",
-                            "--ram-kv-window", "98304", "--ram-kv-budget-bytes", "32000000000"});
-    failures += check(ram.ram_kv.gpu_tokens == 98304 && ram.kv_capacity.explicit_tokens == 98304 &&
-                          ram.ram_kv.budget_bytes == 32000000000ULL,
-                      "RAM KV did not separate logical and resident capacity");
-    failures += check(defaults.ram_kv.gpu_tokens == 0, "RAM KV unexpectedly enabled by default");
+    const auto memory = parse({"ninfer-serve", "model.ninfer", "--max-context", "524288",
+                               "--kvmem", "--kvmem-budget", "65536", "--kvmem-host-mib", "40960"});
+    failures += check(memory.kvmem.budget_tokens == 65536 &&
+                          memory.kvmem.gen_reserve_tokens == 1024 &&
+                          memory.kv_capacity.explicit_tokens == 66560 &&
+                          memory.kvmem.host_bytes == (40960ULL << 20),
+                      "KVMem did not separate logical and resident capacity");
+    failures += check(memory.kvmem.sink_tokens == 1024 && memory.kvmem.recent_tokens == 5248,
+                      "KVMem did not resolve automatic sink/recent bands");
+    const auto bands = parse({"ninfer-serve", "model.ninfer", "--kvmem", "--kvmem-sink-tokens", "0",
+                              "--kvmem-recent-tokens", "100"});
+    failures += check(bands.kvmem.sink_tokens == 0 && bands.kvmem.recent_tokens == 128,
+                      "KVMem explicit sink/recent bands were not honored");
+    const auto kvmem_defaults = parse({"ninfer-serve", "model.ninfer", "--kvmem"});
+    failures += check(kvmem_defaults.kvmem.budget_tokens == 32768 &&
+                          kvmem_defaults.kvmem.host_bytes == (16384ULL << 20),
+                      "KVMem canonical defaults changed");
+    failures += check(!defaults.kvmem.enabled(), "KVMem unexpectedly enabled by default");
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--kvmem-gen-reserve", "2048"}),
+                      "KVMem settings without --kvmem were accepted");
+    failures += check(parse({"ninfer-serve", "--kvmem-capabilities"}).kvmem_capabilities_requested,
+                      "--kvmem-capabilities was not recognized");
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

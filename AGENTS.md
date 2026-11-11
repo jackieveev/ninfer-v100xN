@@ -135,7 +135,7 @@ page-rounded Main Text budget, with FIFO branch eviction and an independent 2 Gi
 cap. Active lane state images retain their separate 2 GiB cap. Restored lineage can share immutable
 host chunks; every active request receives private writable GPU pages and GDN state. This admits
 historical branch and completed-sibling restoration, not arbitrary substring reuse or partial-state
-reuse for Vision/DFlash/RAM-KV. The token budget is not a process RSS limit.
+reuse for Vision/DFlash/KVMem. The token budget is not a process RSS limit.
 The explicitly requested remote extension targets four NVLink-connected V100-SXM2 16 GB cards,
 single-request TP4 Text/MTP on Qwen3.8-27B official NVFP4, QUASAR NVFP4 and native block-128
 FP8. QUASAR TP4 admits the default-off long-attention and fast-decode profiles; its four-card
@@ -176,8 +176,8 @@ The 27B draft window is at most seven. On this V100X2, the verified DFlash profi
 capacity with a 1024-token prefill chunk, not the 180000-capacity MTP acceptance profile.
 
 The optional `volta_long_attention` profile admits SM70 27B TP2/TP4, PP1 experimental 1–8-request
-Text/None/MTP and TP2 Vision/None/MTP with complete INT8 group-64 KV, without RAM-KV. It retains every
-causally visible key but changes split partitioning, softmax association and PV accumulation;
+Text/None/MTP and TP2 Vision/None/MTP with INT8 group-64 KV, complete or KVMem-selected. It retains every
+causally visible resident key but changes split partitioning, softmax association and PV accumulation;
 it is default-off and not bit-equivalent to ordinary attention. The 104-question local GPQA
 comparison is behavioral evidence, not a full 198-question evaluation or proof of losslessness.
 
@@ -261,20 +261,24 @@ control forces the qualified no-P2P staging route and verifies zero link-counter
 not a direct PCIe P2P measurement.
 See `docs/tp4.md`.
 
-The explicit RAM-KV experiment is optional SM70 27B TP1/TP2/PP2 single-request Text/None/MTP.
-It stores original packed KV in a bounded RAM archive and uses KVMem-inspired Q/K cosine
-mean-128 retrieval with chronological resident page tables. Keys are decoded from the original
-cache and inverse-rotated for the index; attention still consumes unchanged packed KV.
-This is approximate attention (also during long prefill), not full-history semantic equivalence.
-The default route is unchanged.
-RAM archive budget and whole-process RSS/cgroup limits are distinct; external llama.cpp results
-do not establish native NInfer performance. See docs/maintainer/paged-kv-cache.md section 15.
+The explicitly requested KVMem port replaces the earlier native RAM-KV experiment. `--kvmem`
+(default off) vendors the github.com/kvmem/kvmem core as backend `ninfer-v100` for SM70 27B
+TP1/TP2, PP1, single-request Text/Vision None/MTP, combinable with long attention, fast decode
+and YaRN up to 1M logical context; DFlash, TP4 and PP2 are rejected. One KVMem block is one
+64-token page; the GPU window is budget plus generation reserve and equals KV capacity. Original
+packed KV is archived in host RAM bounded by `--kvmem-host-mib` (not a process RSS limit).
+Inverse-RoPE page Mean-K and the prompt's last pre-RoPE Q rows feed KVMem scoring; the engine's
+page movement realizes the selected blocks, and media blocks stay resident. Graph propagation,
+disk tier, sessions and layerwise recall are not ported. This is approximate attention (also
+during long prefill), not full-history semantic equivalence; the default route is unchanged.
+The user's acceptance targets QUASAR-derived Coder390 at 512K and 1M; see docs/experiments.md
+and docs/maintainer/paged-kv-cache.md section 15.
 
 The requested pipeline experiment additionally admits SM70 Qwen3.8-27B NVFP4/QUASAR
 startup-fixed TP1/PP2 single-request Text/None/MTP with prefix reuse. Device 1 owns
 layers 0..31, device 0 layers 32..63 and output/MTP. Bounded chronological prefill waves
-overlap stages; decode visits both stages serially. Optional sparse RAM-KV is admitted.
-Vision, DFlash, storage mode
+overlap stages; decode visits both stages serially.
+KVMem, Vision, DFlash, storage mode
 and concurrency above one are not admitted. No request-time TP/PP migration is provided.
 
 The v0.2.1 TP2 concurrency update adds packed NVFP4 batch projections at T9..64 and

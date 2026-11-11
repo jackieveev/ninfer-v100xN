@@ -109,12 +109,6 @@ std::uint32_t rope_effective_max_context(const EngineOptions& options, const Rop
                 "computed for, and no YaRN rope_parameters are published for this checkpoint; use "
                 "--rope native");
         }
-        if (options.enable_vision) {
-            throw std::invalid_argument(
-                "--rope yarn cannot be combined with --vision: the Vision encoder ropes 2-D "
-                "image-grid positions through its own 18-entry table, which the 32-entry text YaRN "
-                "table does not describe; use --rope native for multimodal runs");
-        }
         if (options.speculative.backend == SpeculativeBackend::DFlash) {
             throw std::invalid_argument(
                 "--rope yarn cannot be combined with --spec dflash: the DFlash attention path "

@@ -1,3 +1,4 @@
+#include "product/kvmem_options/kvmem_options.h"
 #include "product/load_progress/load_progress.h"
 #include "serve/console_log.h"
 #include "serve/generation_service.h"
@@ -43,6 +44,10 @@ int main(int argc, char** argv) {
         const ninfer::serve::ServeOptions options = ninfer::serve::parse_serve_options(argc, argv);
         if (options.help_requested) {
             std::cout << ninfer::serve::serve_usage_text(argv[0]);
+            return 0;
+        }
+        if (options.kvmem_capabilities_requested) {
+            std::cout << ninfer::product::kvmem_capabilities_json() << '\n';
             return 0;
         }
 
@@ -96,6 +101,11 @@ int main(int argc, char** argv) {
             capacity << " media-workers=" << media.preprocess_threads
                      << " media-cache=" << format_bytes(media.capacity_bytes)
                      << " media-live=" << format_bytes(media.live_capacity_bytes);
+        }
+        if (memory.kvmem_window_tokens != 0) {
+            capacity << " kvmem budget=" << memory.kvmem_budget_tokens
+                     << " window=" << memory.kvmem_window_tokens
+                     << " archive=" << format_bytes(memory.kvmem_archive_bytes);
         }
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, capacity.str());
 

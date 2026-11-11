@@ -925,11 +925,9 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
     const Tensor& rope_positions =
         active_rope_positions_ != nullptr ? *active_rope_positions_ : io_.rope_pos;
-    if (batch_text_kv_->retrieval_keys.data && ph == Phase::Prefill && capture_retrieval_query_) {
-        ops::kv_retrieval_query_summary(qn, cache_positions.view({T}), batch_text_kv_->retrieval_span,
-            batch_text_kv_->retrieval_query.slice(2, fidx, 1),
-            batch_text_kv_->retrieval_fallback.slice(2, fidx, 1),
-            batch_text_kv_->retrieval_counts.slice(0, fidx, 1), s);
+    if (batch_text_kv_->retrieval_rows.data && ph == Phase::Prefill && capture_retrieval_query_) {
+        ops::kv_retrieval_query_rows(qn, cache_positions.view({T}), batch_text_kv_->retrieval_span,
+                                     batch_text_kv_->retrieval_rows.slice(3, fidx, 1), s);
     }
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
     ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn, kn, rope_frequency_[0], s);
@@ -955,11 +953,6 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
         ops::gqa_attention(qn, kn, v, cache_positions, Tensor{}, kv_table_rows, kAttnScale,
                            batch_text_kv_->batch_layer_view(fidx), attention_envelope(*active_gqa_envelope_), work_, a,
                            s);
-    }
-    if (batch_text_kv_->retrieval_keys.data) {
-        const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        ops::kv_retrieval_key_summary(batch_text_kv_->batch_layer_view(fidx), cache_positions.view({T}),
-            valid, batch_text_kv_->retrieval_keys.slice(3, fidx, 1), rope_frequency_[0], s);
     }
     ops::sigmoid_mul(gate, a, s);
 
@@ -1756,10 +1749,9 @@ void TextContext::attn_mix_tp2(const std::array<const FullLayerW*, kMaximumExecu
         ops::rmsnorm(q[r], *w[r]->q_norm, kCfg.rms_eps, true, qn[r], s);
         ops::rmsnorm(k[r], *w[r]->k_norm, kCfg.rms_eps, true, kn[r], s);
         const qwen3_6::PagedKVCache& pages = rank == 0 ? *batch_text_kv_ : *tp_[rank - 1].batch_kv;
-        if (pages.retrieval_keys.data && ph == Phase::Prefill && capture_retrieval_query_) {
-            ops::kv_retrieval_query_summary(qn[r], cache.view({T}), pages.retrieval_span,
-                pages.retrieval_query.slice(2, fidx, 1), pages.retrieval_fallback.slice(2, fidx, 1),
-                pages.retrieval_counts.slice(0, fidx, 1), s);
+        if (pages.retrieval_rows.data && ph == Phase::Prefill && capture_retrieval_query_) {
+            ops::kv_retrieval_query_rows(qn[r], cache.view({T}), pages.retrieval_span,
+                                         pages.retrieval_rows.slice(3, fidx, 1), s);
         }
         Tensor rope_for_op = active_sequence_batch_ != 0 ? rope.view({T}) : rope;
         ops::rope(rope_for_op, kCfg.rotary_dim, kCfg.rope_theta, qn[r], kn[r],
@@ -1787,10 +1779,6 @@ void TextContext::attn_mix_tp2(const std::array<const FullLayerW*, kMaximumExecu
             ops::gqa_attention(qn[r], kn[r], v[r], cache, Tensor{}, rank_kv_table_rows(rank),
                                kAttnScale, pages.batch_layer_view(fidx), attention_envelope(*active_gqa_envelope_),
                                *ws[r], a[r], s);
-        }
-        if (pages.retrieval_keys.data) {
-            ops::kv_retrieval_key_summary(pages.batch_layer_view(fidx), cache.view({T}),
-                rank_valid_columns(rank), pages.retrieval_keys.slice(3, fidx, 1), rope_frequency_[r], s);
         }
         ops::sigmoid_mul(gate[r], a[r], s);
     });

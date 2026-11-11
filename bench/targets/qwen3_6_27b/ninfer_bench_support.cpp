@@ -1,5 +1,7 @@
 #include "ninfer_bench_support.h"
 
+#include "product/kvmem_options/kvmem_options.h"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -313,7 +315,8 @@ std::string usage_text(std::string_view program) {
         << "  --tp <1|2|4>                tensor-parallel width (default: 1)\n"
         << "  --pp <1|2>                  pipeline degree; PP2 requires TP1 SM70 NVFP4/QUASAR\n"
         << "  --pipeline-chunks <1..8>    PP prefill wave; 1 is serial (default: 8)\n"
-        << "  --ram-kv-window <tokens>   Optional approximate Q/K retrieval GPU window\n"
+        << "  --kvmem [--kvmem-budget B] [--kvmem-gen-reserve R] [--kvmem-host-mib H] ...\n"
+        << "                              KVMem block-sparse long-context memory (default off)\n"
         << "  --volta-fast-decode       Experimental QUASAR TP2 Text FP32 epilogues / packed MTP W8\n"
         << "  --volta-long-attention    Experimental complete-history SM70 TP2 INT8 attention\n"
         << "  --devices <id,...>          one CUDA device per rank; required for parallel execution\n"
@@ -333,6 +336,7 @@ BenchOptions parse_args(int argc, char** argv) {
     bool saw_artifact = false;
     bool device_explicit = false;
     bool devices_explicit = false;
+    product::KvMemCommandLine kvmem_cli;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
         auto value = [&](const char* flag) -> std::string {
@@ -411,8 +415,10 @@ BenchOptions parse_args(int argc, char** argv) {
             options.volta_fast_decode = true;
         } else if (arg == "--volta-long-attention") {
             options.volta_long_attention = true;
-        } else if (arg == "--ram-kv-window") {
-            options.ram_kv.gpu_tokens = parse_positive(value("--ram-kv-window"), "ram-kv-window");
+        } else if (kvmem_cli.parse(std::string(arg), [&](const char* flag) {
+                       if (i + 1 >= argc) { throw std::invalid_argument(std::string(flag) + " requires value"); }
+                       return static_cast<const char*>(argv[++i]);
+                   })) {
         } else if (arg == "--devices") {
             options.devices = parse_devices(value("--devices"));
             devices_explicit = true;
@@ -440,6 +446,7 @@ BenchOptions parse_args(int argc, char** argv) {
         }
     }
     if (!saw_artifact) { throw std::invalid_argument("--weights is required"); }
+    options.kvmem = kvmem_cli.resolve();
     if (options.capture_generation && options.output != OutputFormat::Json) {
         throw std::invalid_argument("--capture-generation requires --output json");
     }
@@ -783,9 +790,9 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "  \"memory\": {\n"
         << "    \"device\": " << env.memory.device << ",\n"
         << "    \"max_context\": " << env.memory.max_context << ",\n"
-        << "    \"ram_kv_gpu_tokens\": " << env.memory.ram_kv_gpu_tokens << ",\n"
-        << "    \"ram_kv_archive_bytes\": " << env.memory.ram_kv_archive_bytes << ",\n"
-        << "    \"ram_kv_transfer_bytes\": " << env.memory.ram_kv_transfer_bytes << ",\n"
+        << "    \"kvmem_window_tokens\": " << env.memory.kvmem_window_tokens << ",\n"
+        << "    \"kvmem_archive_bytes\": " << env.memory.kvmem_archive_bytes << ",\n"
+        << "    \"kvmem_transfer_bytes\": " << env.memory.kvmem_transfer_bytes << ",\n"
         << "    \"kv_capacity_mode\": \""
         << (env.memory.kv_capacity_mode == KvCapacityMode::Automatic ? "auto" : "explicit")
         << "\",\n"

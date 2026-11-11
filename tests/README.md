@@ -1,14 +1,12 @@
 # Tests
 
-Native RAM-KV checks: `ninfer_ram_kv_test` covers exact packed page eviction/reload and sparse
-GQA against the independent FP64 oracle (TP2 geometry, BF16/INT8, decode/cached/Volta prefill).
-It also checks Q aggregation, inverse-RoPE cached-K means, masked partial-page replacement and
-cosine scoring against independent FP64 formulas at H=2/4, including original positions near 85K.
-`NINFER_RAM_KV_REAL_WEIGHTS=/absolute/model.ninfer ctest -R '^ninfer_ram_kv_real_test$'`
-is opt-in: default/full-window token parity, real 29.8K eviction, MTP partial commit, complete
-checkpoint replay, and appended-query reuse on two V100s. It does not qualify general quality
-equivalence of approximate retrieval. `tools/v100/bench_ram_kv.py` evaluates existing long-input
-fixtures through HTTP/public Engine with a whole-server 32 GB cgroup cap.
+KVMem checks: `ninfer_kv_retrieval_test` covers exact pre-RoPE query-row capture, inverse-RoPE
+page Mean-K against an independent FP64 oracle, exact `select_pages` archive eviction/reload, and
+sparse GQA (ordinary and long attention) against the FP64 oracle.
+`NINFER_KVMEM_REAL_WEIGHTS=/absolute/model.ninfer ctest -R '^ninfer_kvmem_real_test$'`
+is opt-in: unpressured-window token parity, real 29.8K mid-archive recall at budget 8192, MTP
+commit and prefix reuse on two V100s. It does not qualify general quality equivalence of
+approximate retrieval.
 
 The retained tests protect current `.ninfer`, numerical operator, target, runtime-transaction,
 benchmark-report, and external protocol behavior. Repository verification principles are defined in

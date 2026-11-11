@@ -70,7 +70,7 @@ struct BenchOptions {
     int tp                         = 1;
     int pp                         = 1;
     std::uint32_t pipeline_chunks   = 8;
-    RamKvOptions ram_kv;
+    KvMemOptions kvmem;
     bool volta_long_attention = false;
     bool volta_fast_decode = false;
     std::vector<int> devices;

@@ -11,6 +11,8 @@
 namespace ninfer::targets::qwen3_6 {
 
 inline constexpr std::int32_t kKvQuantGroup = 64;
+inline constexpr std::int32_t kKvMemQueryRows = 512;
+inline constexpr std::int32_t kKvMemSummaryPages = 64;
 
 struct DecoderStateSpec {
     std::uint32_t full_attention_layers     = 0;
@@ -24,7 +26,7 @@ struct DecoderStateSpec {
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
     std::uint32_t mtp_physical_page_groups  = 0;
-    bool ram_kv = false;
+    bool kvmem = false;
     LinearAttentionStatePoolSpec linear_attention;
 };
 
@@ -36,12 +38,10 @@ struct PagedKVCacheLayout {
     std::int32_t head_dim     = 0;
     DType dtype               = DType::BF16;
     std::int32_t quant_group  = 0;
-    TensorRegion retrieval_keys;
-    TensorRegion retrieval_query;
-    TensorRegion retrieval_fallback;
-    TensorRegion retrieval_counts;
+    TensorRegion retrieval_rows;
     TensorRegion retrieval_span;
-    TensorRegion retrieval_scores;
+    TensorRegion retrieval_means;
+    TensorRegion retrieval_offsets;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return pool.payload_bytes(); }
 };
@@ -86,13 +86,13 @@ public:
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
 
-    // Persistent single-request retrieval state; empty on the full-history route.
-    Tensor retrieval_keys;
-    Tensor retrieval_query;
-    Tensor retrieval_fallback;
-    Tensor retrieval_counts;
+    // KVMem single-request statistics capture on the Text cache; empty otherwise.
+    // rows[D,Hq,kKvMemQueryRows,L]: BF16 pre-RoPE query rows of the retrieval span.
+    // means[D,H,kKvMemSummaryPages,L]: FP32 page Mean-K staging for host statistics.
+    Tensor retrieval_rows;
     Tensor retrieval_span;
-    Tensor retrieval_scores;
+    Tensor retrieval_means;
+    Tensor retrieval_offsets;
 
 private:
     friend class PagedKVCacheView;

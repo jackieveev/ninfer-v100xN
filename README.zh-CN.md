@@ -109,7 +109,7 @@ GUI/TUI 可设置 `--prefix-cache-tokens`，默认推荐 **384,000 tokens**，�
 QUASAR INT8 主 KV 加 MTP 在该预算下约占 **12.8 GiB 主机内存**，另有状态与临时所有权；
 按 1M tokens 折算约为 33.4 GiB；
 归档状态另受 2 GiB 上限限制。设为 0 仅关闭历史保留，仍可复用当前 GPU 前缀。
-视觉、DFlash、稀疏 RAM-KV 不使用历史分枝。
+视觉、DFlash、KVMem 不使用历史分枝。
 [缓存语义与限制](docs/maintainer/paged-kv-cache.md#104-historical-branches)。
 
 Responses 可用 `reasoning: {"effort": "high"}`，按当前 Qwen 模板映射；`none` 关闭思考。
@@ -263,7 +263,7 @@ CLI 用 `build-v100/apps/ninfer`，相同推理参数加 `--prompt TEXT --max-ne
 |---|---|
 | [TP4 / NVLink](docs/tp4.md) | 远端四卡、QUASAR/官方 NVFP4/native FP8 与同机 TP2 对照 |
 | [其他 V100 测评](docs/performance-v100.md) | 官方 NVFP4、Q4_K_M、P2P/staging、前缀缓存 |
-| [RAM-KV / PP2 实验](docs/experiments.md) | 稀疏检索与启动时固定的分层流水线 |
+| [KVMem / PP2 实验](docs/experiments.md) | KVMem 512K/1M 长上下文检索与启动时固定的分层流水线 |
 | [替代模型 / 视觉](docs/alternatives.md) | Q4_K_M 转换、QUASAR 图片/视频入口 |
 | [V100 实现说明](docs/v100-implementation.md) | kernel、通信和数值验证细节 |
 | [解码源码调研](docs/v100-decode-survey.md) | 已读项目、采用机制和待引入/继续优化候选 |
@@ -284,7 +284,7 @@ TP4 直接 attention combine 也参考其 grouped combine；投影调度参考�
 [解码源码调研与接入状态](docs/v100-decode-survey.md)。
 DFlash2 参考 [Inco AI](https://inco.ai/blog/dflash2/) 和
 [草稿 checkpoint](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)；
-[KVMem](https://github.com/kvmem/kvmem-llama.cpp) 为 RAM-KV 检索提供参考。
+可选 `--kvmem` 模式内置 [KVMem](https://github.com/kvmem/kvmem) core（backend `ninfer-v100`），为近似注意力，需显式开启。
 [Li3age](https://github.com/Li3age) 在 [PR #1](https://github.com/tuxKOH/ninfer-V100X2/pull/1)
 贡献实验 TP2 视觉与可配置视觉预算。
 

@@ -3,7 +3,6 @@
 
 #include "targets/qwen3_6/impl/runtime/schedule.h"
 #include "targets/qwen3_6/impl/runtime/yarn_rope.h"
-#include "targets/qwen3_6/impl/runtime/ram_kv_selection.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/kv_retrieval.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
@@ -258,7 +257,7 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in,
                           : std::nullopt),
       capacity(plan.capacity), kv_capacity(plan.kv_capacity),
       max_concurrency(plan.max_concurrency), prefix_cache_tokens(plan.prefix_cache_tokens), prefill_chunk(plan.prefill_chunk),
-      draft_window(plan.draft_window), ram_kv(plan.ram_kv), volta_long_attention(plan.volta_long_attention),
+      draft_window(plan.draft_window), kvmem(plan.kvmem), volta_long_attention(plan.volta_long_attention),
       speculative_backend(plan.speculative_backend),
       kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
@@ -825,30 +824,9 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                 ? std::min(capacity,
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
             : backend_kv_cache() != nullptr ? prompt_tokens : 0U;
-        if (ram_kv.gpu_tokens != 0) {
-            const auto query = prompt.retrieval_query;
-            const bool retain_query = base >= query.begin + query.count &&
-                sequence.ram_query.begin == query.begin && sequence.ram_query.count == query.count;
-            const std::array<int, 2> span{static_cast<int>(query.begin),
-                                          static_cast<int>(query.begin + query.count)};
-            const auto configure = [&](qwen3_6::PagedKVCache& cache, DeviceContext& ctx) {
-                if (!retain_query) {
-                    CUDA_CHECK(cudaMemsetAsync(cache.retrieval_query.data, 0, cache.retrieval_query.bytes(), ctx.stream));
-                    CUDA_CHECK(cudaMemsetAsync(cache.retrieval_counts.data, 0, cache.retrieval_counts.bytes(), ctx.stream));
-                }
-                CUDA_CHECK(cudaMemcpyAsync(cache.retrieval_span.data, span.data(), sizeof(span), cudaMemcpyHostToDevice, ctx.stream));
-                CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
-            };
-            configure(decoder->text_kv, device);
-            for (auto& peer : peers) {
-                const ScopedDevice scope(peer->device.device);
-                configure(peer->decoder->text_kv, peer->device);
-            }
-            sequence.ram_query = query;
-            sequence.ram_rank_frontier = base;
-            refresh_ram_kv(sequence, base);
-            // Cold prefill materializes one execution unit at a time. A retained prefix may
-            // need cold pages reloaded when the query ranking changes, even without growth.
+        if (kvmem.enabled()) {
+            // Cold prefill materializes one execution unit at a time under KVMem pressure.
+            kvmem_begin(sequence, prompt, base);
             materialize_sequence_kv(sequence, base, backend_kv_valid(sequence));
         } else { materialize_sequence_kv(sequence, prompt_tokens, backend_materialized); }
         install_sampling(sequence, request, request_plan.sampling);
@@ -1658,35 +1636,196 @@ void ProgramImplCore::unbind_sequence_kv(SequenceState& sequence) noexcept {
     sequence.kv->text.unbind_row();
 }
 
-void ProgramImplCore::refresh_ram_kv(SequenceState& sequence, std::uint32_t frontier) {
-    if (ram_kv.gpu_tokens == 0 || frontier <= ram_kv.gpu_tokens) { return; }
-    std::vector<double> combined(frontier / 128, 0);
-    const auto score = [&](qwen3_6::PagedKVCache& cache, DeviceContext& ctx) {
-        const ScopedDevice scope(ctx.device);
-        ops::kv_retrieval_scores(cache.retrieval_keys, cache.retrieval_query,
-            cache.retrieval_fallback, cache.retrieval_counts, frontier, cache.retrieval_scores, ctx.stream);
-        std::vector<float> scores(combined.size());
-        CUDA_CHECK(cudaMemcpyAsync(scores.data(), cache.retrieval_scores.data,
-            scores.size() * sizeof(float), cudaMemcpyDeviceToHost, ctx.stream));
-        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
-        for (std::size_t b = 0; b < scores.size(); ++b) { combined[b] += scores[b] / device_count; }
-    };
-    score(decoder->text_kv, device);
-    for (auto& peer : peers) { score(peer->decoder->text_kv, peer->device); }
-    const auto ranking = qwen3_6::detail::rank_ram_kv_pages(combined);
-    sequence.kv->text.prefer_pages(ranking);
-    if (sequence.kv->backend) { sequence.kv->backend->prefer_pages(ranking); }
-    for (auto& peer : peers) {
-        sequence.kv->text_peers[peer->rank - 1]->prefer_pages(ranking);
-        if (sequence.kv->backend_peers[peer->rank - 1]) {
-            sequence.kv->backend_peers[peer->rank - 1]->prefer_pages(ranking);
+void ProgramImplCore::kvmem_begin(SequenceState& sequence, const PreparedPromptData& prompt,
+                                  std::uint32_t base) {
+    if (!sequence.kvmem) {
+        sequence.kvmem = std::make_unique<qwen3_6::detail::KvMemSession>(
+            kvmem,
+            qwen3_6::detail::KvMemGeometry{
+                .layers      = static_cast<std::uint32_t>(TextConfig::full_attention_layers()),
+                .kv_heads    = static_cast<std::uint32_t>(TextConfig::kv_heads),
+                .query_heads = static_cast<std::uint32_t>(TextConfig::query_heads),
+                .head_dim    = static_cast<std::uint32_t>(TextConfig::head_dim)},
+            device.device);
+    }
+    auto& session = *sequence.kvmem;
+    session.rewind(base);
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> media;
+    for (const auto& item : prompt.vision_items) {
+        for (const auto& span : item.token_spans) {
+            media.emplace_back(static_cast<std::uint32_t>(span.begin),
+                               static_cast<std::uint32_t>(span.begin + span.count));
         }
     }
-    sequence.ram_rank_frontier = frontier;
-    if (std::getenv("NINFER_RAM_KV_TRACE")) {
-        std::fprintf(stderr, "RAM_KV_RETRIEVAL frontier=%u blocks=%zu query=%zu:%zu\n",
-            frontier, combined.size(), sequence.ram_query.begin, sequence.ram_query.count);
+    session.set_media(std::move(media));
+
+    // Page means undo text RoPE at cache position + offset. Text MRoPE positions are equal on all
+    // three axes and therefore 1-D RoPE; pages containing media positions keep no Mean-K.
+    const std::size_t tokens = prompt.token_ids.size();
+    const bool mrope = prompt.positions.size() == 3 * tokens;
+    const auto offset_at = [&](std::size_t t) -> std::int32_t {
+        if (!mrope) { return 0; }
+        const std::int32_t p = prompt.positions[t];
+        if (prompt.positions[tokens + t] != p || prompt.positions[2 * tokens + t] != p) {
+            return ops::kKvRetrievalNoRopeOffset;
+        }
+        return p - static_cast<std::int32_t>(t);
+    };
+    const std::size_t pages = (tokens + 63) / 64;
+    sequence.kvmem_rope_offsets.assign(pages, prompt.rope_delta);
+    for (std::size_t page = 0; page < pages; ++page) {
+        std::int32_t offset = offset_at(page * 64);
+        for (std::size_t t = page * 64; t < std::min(tokens, page * 64 + 64); ++t) {
+            if (offset_at(t) != offset) { offset = ops::kKvRetrievalNoRopeOffset; break; }
+        }
+        if (page * 64 + 64 > tokens && offset != prompt.rope_delta) {
+            offset = ops::kKvRetrievalNoRopeOffset;
+        }
+        sequence.kvmem_rope_offsets[page] = offset;
     }
+
+    const auto query = prompt.retrieval_query;
+    const std::array<int, 2> span{static_cast<int>(query.begin),
+                                  static_cast<int>(query.begin + query.count)};
+    const auto configure = [&](qwen3_6::PagedKVCache& cache, DeviceContext& ctx) {
+        CUDA_CHECK(cudaMemcpyAsync(cache.retrieval_span.data, span.data(), sizeof(span),
+                                   cudaMemcpyHostToDevice, ctx.stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+    };
+    configure(decoder->text_kv, device);
+    for (auto& peer : peers) {
+        const ScopedDevice scope(peer->device.device);
+        configure(peer->decoder->text_kv, peer->device);
+    }
+    sequence.kvmem_query_selected = false;
+    if (session.selection_active()) {
+        kvmem_apply(sequence, session.selected(), session.selection_frontier());
+    }
+}
+
+void ProgramImplCore::kvmem_summarize(SequenceState& sequence, std::uint32_t frontier) {
+    auto& session = *sequence.kvmem;
+    const std::uint32_t target = frontier / 64;
+    while (session.summarized_pages() < target) {
+        const std::uint32_t first = session.summarized_pages();
+        const std::uint32_t count = std::min<std::uint32_t>(target - first, qwen3_6::kKvMemSummaryPages);
+        session.write_page_means(first, count, kvmem_page_means(sequence, first, count));
+    }
+}
+
+std::vector<float> ProgramImplCore::kvmem_page_means(SequenceState& sequence, std::uint32_t first,
+                                                     std::uint32_t count) {
+    constexpr auto layers = static_cast<std::uint32_t>(TextConfig::full_attention_layers());
+    constexpr auto head_dim = static_cast<std::size_t>(TextConfig::head_dim);
+    const auto local_heads = static_cast<std::size_t>(TextConfig::kv_heads / device_count);
+    const std::size_t width = static_cast<std::size_t>(TextConfig::kv_heads) * head_dim;
+    std::vector<std::int32_t> offsets(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t page = first + i;
+        offsets[i] = page < sequence.kvmem_rope_offsets.size() ? sequence.kvmem_rope_offsets[page]
+                                                               : sequence.rope_delta;
+    }
+    std::vector<float> means(static_cast<std::size_t>(layers) * count * width);
+    std::vector<float> staging(static_cast<std::size_t>(layers) * count * local_heads * head_dim);
+    const auto summarize = [&](qwen3_6::PagedKVCache& cache, DeviceContext& ctx, int rank) {
+        const ScopedDevice scope(ctx.device);
+        CUDA_CHECK(cudaMemcpyAsync(cache.retrieval_offsets.data, offsets.data(),
+                                   count * sizeof(std::int32_t), cudaMemcpyHostToDevice, ctx.stream));
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            Tensor out = cache.retrieval_means.slice(3, static_cast<std::int32_t>(layer), 1)
+                             .slice(2, 0, static_cast<std::int32_t>(count));
+            ops::kv_retrieval_page_means(cache.batch_layer_view(layer), first,
+                                         cache.retrieval_offsets, out,
+                                         rope_frequency[static_cast<std::size_t>(rank)], ctx.stream);
+            CUDA_CHECK(cudaMemcpyAsync(staging.data() + static_cast<std::size_t>(layer) * count * local_heads * head_dim,
+                                       out.data, out.bytes(), cudaMemcpyDeviceToHost, ctx.stream));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            for (std::uint32_t page = 0; page < count; ++page) {
+                const float* source = staging.data() +
+                    ((static_cast<std::size_t>(layer) * count + page) * local_heads) * head_dim;
+                float* target_row = means.data() + (static_cast<std::size_t>(layer) * count + page) * width +
+                    static_cast<std::size_t>(rank) * local_heads * head_dim;
+                std::copy_n(source, local_heads * head_dim, target_row);
+            }
+        }
+    };
+    summarize(decoder->text_kv, device, 0);
+    for (auto& peer : peers) { summarize(peer->decoder->text_kv, peer->device, peer->rank); }
+    return means;
+}
+
+void ProgramImplCore::kvmem_apply(SequenceState& sequence, std::vector<std::uint32_t> selected,
+                                  std::uint32_t frontier) {
+    const std::vector<std::int32_t> pages(selected.begin(), selected.end());
+    const std::uint32_t pinned = frontier / 64;
+    sequence.kv->text.select_pages(pages, pinned);
+    if (sequence.kv->backend) { sequence.kv->backend->select_pages(pages, pinned); }
+    for (auto& peer : peers) {
+        sequence.kv->text_peers[peer->rank - 1]->select_pages(pages, pinned);
+        if (sequence.kv->backend_peers[peer->rank - 1]) {
+            sequence.kv->backend_peers[peer->rank - 1]->select_pages(pages, pinned);
+        }
+    }
+    sequence.kvmem->commit(std::move(selected), frontier);
+}
+
+void ProgramImplCore::kvmem_reserve(SequenceState& sequence, std::uint32_t frontier,
+                                    std::uint32_t end) {
+    auto& session = *sequence.kvmem;
+    if (session.resident_tokens(end) <= session.window_tokens()) { return; }
+    kvmem_summarize(sequence, frontier);
+    session.register_to(frontier);
+    const bool prefill = !sequence.kvmem_query_selected;
+    kvmem_apply(sequence, prefill ? session.pressure_selection() : session.decode_selection(), frontier);
+    if (session.resident_tokens(end) > session.window_tokens()) {
+        throw std::logic_error("KVMem selection leaves no room for the next append");
+    }
+}
+
+void ProgramImplCore::kvmem_select_query(SequenceState& sequence, std::uint32_t frontier) {
+    constexpr auto layers = static_cast<std::size_t>(TextConfig::full_attention_layers());
+    constexpr auto head_dim = static_cast<std::size_t>(TextConfig::head_dim);
+    constexpr auto rows = static_cast<std::size_t>(qwen3_6::kKvMemQueryRows);
+    const auto local_heads = static_cast<std::size_t>(TextConfig::query_heads / device_count);
+    const std::size_t width = static_cast<std::size_t>(TextConfig::query_heads) * head_dim;
+    std::array<int, 2> span{};
+    CUDA_CHECK(cudaMemcpy(span.data(), decoder->text_kv.retrieval_span.data, sizeof(span),
+                          cudaMemcpyDeviceToHost));
+    const auto row_count = static_cast<std::uint32_t>(
+        std::min<std::size_t>(rows, static_cast<std::size_t>(std::max(0, span[1] - span[0]))));
+    if (row_count == 0) {
+        sequence.kvmem_query_selected = true;
+        return;
+    }
+    std::vector<float> query(layers * row_count * width);
+    std::vector<std::uint16_t> staging(layers * rows * local_heads * head_dim);
+    const auto read = [&](qwen3_6::PagedKVCache& cache, DeviceContext& ctx, int rank) {
+        const ScopedDevice scope(ctx.device);
+        CUDA_CHECK(cudaMemcpyAsync(staging.data(), cache.retrieval_rows.data, cache.retrieval_rows.bytes(),
+                                   cudaMemcpyDeviceToHost, ctx.stream));
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream));
+        for (std::size_t layer = 0; layer < layers; ++layer) {
+            for (std::size_t row = 0; row < row_count; ++row) {
+                const std::uint16_t* source = staging.data() +
+                    ((layer * rows + rows - row_count + row) * local_heads) * head_dim;
+                float* target = query.data() + (layer * row_count + row) * width +
+                    static_cast<std::size_t>(rank) * local_heads * head_dim;
+                for (std::size_t i = 0; i < local_heads * head_dim; ++i) {
+                    const std::uint32_t bits = static_cast<std::uint32_t>(source[i]) << 16;
+                    std::memcpy(target + i, &bits, sizeof(float));
+                }
+            }
+        }
+    };
+    read(decoder->text_kv, device, 0);
+    for (auto& peer : peers) { read(peer->decoder->text_kv, peer->device, peer->rank); }
+    kvmem_summarize(sequence, frontier);
+    auto& session = *sequence.kvmem;
+    session.register_to(frontier);
+    kvmem_apply(sequence, session.query_selection(query, row_count), frontier);
+    sequence.kvmem_query_selected = true;
 }
 
 void ProgramImplCore::materialize_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
@@ -1697,7 +1836,11 @@ void ProgramImplCore::materialize_sequence_kv(SequenceState& sequence, std::uint
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV materialization requested without an allocation");
     }
-    if (ram_kv.gpu_tokens != 0 || main_tokens > sequence.kv->text.mapped_token_capacity()) {
+    if (sequence.kvmem) {
+        kvmem_reserve(sequence, std::min(sequence.text_kv_valid, main_tokens),
+                      std::max(main_tokens, backend_tokens));
+    }
+    if (kvmem.enabled() || main_tokens > sequence.kv->text.mapped_token_capacity()) {
         sequence.kv->text.materialize_tokens(std::min(capacity,
             std::max(main_tokens, sequence.kv->text.mapped_token_capacity())), device.stream);
         for (auto& peer : peers) {
@@ -1706,17 +1849,8 @@ void ProgramImplCore::materialize_sequence_kv(SequenceState& sequence, std::uint
                 std::min(capacity, std::max(main_tokens,
                     sequence.kv->text_peers[peer->rank - 1]->mapped_token_capacity())), peer->device.stream);
         }
-        if (ram_kv.gpu_tokens != 0 && std::getenv("NINFER_RAM_KV_TRACE") &&
-            main_tokens >= sequence.ram_query.begin) {
-            std::fprintf(stderr, "RAM_KV_RESIDENT frontier=%u pages=", main_tokens);
-            const auto pages = sequence.kv->text.page_ids();
-            for (std::size_t p = 0; p < pages.size(); ++p) {
-                if (pages[p] >= 0) { std::fprintf(stderr, "%zu,", p); }
-            }
-            std::fprintf(stderr, "\n");
-        }
     }
-    if (backend_tokens != 0 && (ram_kv.gpu_tokens != 0 ||
+    if (backend_tokens != 0 && (kvmem.enabled() ||
                                backend_tokens > sequence.kv->backend->mapped_token_capacity())) {
         sequence.kv->backend->materialize_tokens(std::min(capacity, std::max(backend_tokens,
             sequence.kv->backend->mapped_token_capacity())), device.stream);
@@ -2655,10 +2789,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
     std::uint32_t processed_prompt_tokens = 0;
     const auto started                    = Clock::now();
     try {
-        if (ram_kv.gpu_tokens != 0 && staged.cursor < staged.prompt_tokens) {
-            if (staged.cursor >= sequence.ram_rank_frontier + 8192) {
-                refresh_ram_kv(sequence, staged.cursor);
-            }
+        if (kvmem.enabled() && staged.cursor < staged.prompt_tokens) {
             const auto end = std::min(staged.prompt_tokens, staged.cursor + prefill_chunk * pipeline_chunks);
             const auto require = [&](PagedKVAllocation& a) {
                 a.require_pages(staged.cursor / 64, (end + 63) / 64);
@@ -2759,7 +2890,10 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                     : std::nullopt;
             // Capture Q once on the final suffix, then replay from the SAME recurrent state
             // with query-selected history. The preview does not sample or publish tokens.
-            if (ram_kv.gpu_tokens != 0 && final_candidate && staged.cursor > ram_kv.gpu_tokens) {
+            // Media tokens in a Vision preview enter as text: only the query tail is consumed.
+            if (kvmem.enabled() && final_candidate && !sequence.kvmem_query_selected &&
+                sequence.kvmem->resident_tokens(staged.prompt_tokens) > sequence.kvmem->window_tokens() -
+                    kvmem.gen_reserve_tokens) {
                 const auto copy_state = [&](bool restore) {
                     const auto copy = [&](qwen3_6::DecoderState& state, DeviceContext& ctx) {
                         const ScopedDevice scope(ctx.device);
@@ -2772,10 +2906,10 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                 const auto preview = schedule::prefill_text_chunk(schedule_state,
                     staged.prompt.token_ids, nominal, std::nullopt, false);
                 if (preview.processed_tokens != nominal) {
-                    throw std::logic_error("RAM KV query preview did not complete the suffix");
+                    throw std::logic_error("KVMem query preview did not complete the suffix");
                 }
                 copy_state(true);
-                refresh_ram_kv(sequence, staged.cursor);
+                kvmem_select_query(sequence, staged.cursor);
                 materialize_sequence_kv(sequence, staged.prompt_tokens,
                     staged.prepare_mtp ? staged.prompt_tokens : 0U);
                 // Do not double-count Q on replay; the captured preview is the retrieval query.
@@ -2858,7 +2992,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
                                        cudaMemcpyDeviceToHost, device.stream));
         }
         device.synchronize();
-        if (ram_kv.gpu_tokens != 0) {
+        if (kvmem.enabled()) {
             sequence.kv->text.require_pages(0, 0);
             if (sequence.kv->backend) { sequence.kv->backend->require_pages(0, 0); }
             for (auto& peer : peers) {
@@ -3548,19 +3682,21 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.cuda_graph_rank_observed_bytes = graph_observed_bytes;
     out.cuda_graph_node_count          = graph_node_count;
     out.kv_payload_bytes               = kv_payload_bytes;
-    out.ram_kv_gpu_tokens              = ram_kv.gpu_tokens;
-    if (ram_kv.gpu_tokens != 0) {
-        out.ram_kv_archive_bytes = decoder->text_kv.pool().ram_archive_bytes();
-        if (decoder->mtp_cache()) { out.ram_kv_archive_bytes += decoder->mtp_cache()->pool().ram_archive_bytes(); }
-        out.ram_kv_archive_bytes *= device_count;
+    if (kvmem.enabled()) {
+        out.kvmem_budget_tokens = kvmem.budget_tokens;
+        out.kvmem_window_tokens = kvmem.window_tokens();
+        out.kvmem_archive_bytes = decoder->text_kv.pool().ram_archive_bytes();
+        if (decoder->mtp_cache()) { out.kvmem_archive_bytes += decoder->mtp_cache()->pool().ram_archive_bytes(); }
+        out.kvmem_archive_bytes *= device_count;
         for (const auto& sequence : sequences) {
+            if (sequence.kvmem) { out.kvmem_selections += sequence.kvmem->selections(); }
             if (!sequence.kv) { continue; }
-            out.ram_kv_transfer_bytes += sequence.kv->text.ram_transfer_bytes();
-            if (sequence.kv->backend) { out.ram_kv_transfer_bytes += sequence.kv->backend->ram_transfer_bytes(); }
+            out.kvmem_transfer_bytes += sequence.kv->text.ram_transfer_bytes();
+            if (sequence.kv->backend) { out.kvmem_transfer_bytes += sequence.kv->backend->ram_transfer_bytes(); }
             for (const auto& peer : peers) {
-                out.ram_kv_transfer_bytes += sequence.kv->text_peers[peer->rank - 1]->ram_transfer_bytes();
+                out.kvmem_transfer_bytes += sequence.kv->text_peers[peer->rank - 1]->ram_transfer_bytes();
                 if (sequence.kv->backend_peers[peer->rank - 1]) {
-                    out.ram_kv_transfer_bytes += sequence.kv->backend_peers[peer->rank - 1]->ram_transfer_bytes();
+                    out.kvmem_transfer_bytes += sequence.kv->backend_peers[peer->rank - 1]->ram_transfer_bytes();
                 }
             }
         }

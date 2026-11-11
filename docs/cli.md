@@ -1,13 +1,16 @@
 # NInfer CLI
 
-Experimental native RAM-KV: add `--ram-kv-window 98304` to a 27B SM70 TP1/TP2/PP2 Text/MTP command.
-This is approximate, training-free Q/K mean-vector retrieval, disabled by default. It keeps packed history
-in RAM but omits unselected pages from attention (including long prefill). `--max-context` remains
-the logical limit; omitted `--kv-capacity` follows the RAM window instead. If explicitly provided,
-KV capacity must equal that window. `--ram-kv-budget-bytes` defaults to 32000000000 and bounds the
-maximum archive across all ranks, not process RSS. Window must be a multiple of 64, at least
-prefill-chunk+8192 (PP2: prefill-chunk*pipeline-chunks+8192), and no larger than max-context.
-Only one active request; no Vision/DFlash/TP4.
+Experimental KVMem: add `--kvmem --kvmem-budget 131072 --kvmem-gen-reserve 2048 --kvmem-host-mib 37024`
+to a 27B SM70 TP1/TP2 Text/Vision None/MTP command (default off). It ports the
+[KVMem](https://github.com/kvmem/kvmem) core: packed history stays in a host RAM archive and only
+query-selected 64-token blocks enter attention, including during long prefill, so this is approximate.
+`--max-context` (with YaRN above 262144, e.g. 1048576) remains the logical limit; omitted
+`--kv-capacity` follows the window `budget + gen-reserve`, and an explicit value must equal it.
+Budget is a multiple of 64 and at least 128; gen reserve is at least the prefill chunk.
+`--kvmem-host-mib` must hold the packed archive for max-context and is not a process RSS limit.
+Long attention and fast decode stay available; one active request; no DFlash/TP4/PP2.
+`--kvmem-capabilities` prints the `ninfer-v100` backend contract; see
+[KVMem semantics](maintainer/paged-kv-cache.md#15-optional-kvmem-experiment).
 
 `build/apps/ninfer` runs one request against one registered `.ninfer` artifact. Build NInfer and
 download an artifact using the [project README](../README.md) before following this guide.
@@ -188,7 +191,7 @@ are a measured choice, not the 35B-A3B semantic limit.
 | `--devices A,B` | exactly `tp * pp` distinct CUDA device indices; required for parallel execution | `--device` |
 | `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
 | `--prefix-cache-tokens N` | historical host KV budget in unique page-rounded Main Text tokens; `0` disables historical branches, preserving current GPU-prefix reuse | `384000` |
-| `--volta-long-attention` | experimental complete-history attention arithmetic; SM70 27B TP2/TP4, PP1, 1–8 active requests, INT8 KV, Text/None/MTP (Vision on TP2 only); excludes RAM-KV; floating-point association and output IDs may change | off |
+| `--volta-long-attention` | experimental complete-history attention arithmetic; SM70 27B TP2/TP4, PP1, 1–8 active requests, INT8 KV, Text/None/MTP (Vision on TP2 only); combines with KVMem; floating-point association and output IDs may change | off |
 | `--volta-fast-decode` | experimental QUASAR SM70 TP2/TP4 Text/None/MTP numeric profile: packed NVFP4 FP32 epilogue and MTP W8 reductions; may change logits, acceptance and output; excludes Vision/DFlash/PP2 | off |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..7` on 27B, `1..15` on 35B-A3B | unset |
@@ -265,7 +268,7 @@ NVFP4/QUASAR layer pipeline. Device 1 owns layers 0..31; device 0 owns layers 32
 the output head and MTP. `--pipeline-chunks 8` submits a bounded prefill wave so the
 next first-half chunk overlaps the previous second-half chunk; `1` is the non-overlapped
 control. Decode traverses the two stages serially. PP2 supports single-request Text,
-None/MTP speculation, prefix reuse and optional sparse RAM-KV, not Vision, DFlash or expert-storage mode.
+None/MTP speculation and prefix reuse, not KVMem, Vision, DFlash or expert-storage mode.
 The choice is fixed at startup: it does not switch to TP2 after prefill or by prompt length.
 
 ```bash
@@ -306,7 +309,8 @@ The registered model IDs have a native context limit of 262,144 tokens, which is
 frequency correction and raises that ceiling to `--yarn-origin` x `--yarn-factor`, up to 1,048,576
 tokens; `--yarn-origin` must equal the registered native capacity (262,144); `--yarn-factor`
 accepts a finite value in [1.0, 64.0] and defaults to 4.0. YaRN works at either `--tp` width and is
-rejected together with `--vision`, `--spec dflash`, or a target with no YaRN rope domain
+combines with `--vision` (the vision tower keeps its native 2-D rope; text MRoPE uses YaRN); it is
+rejected together with `--spec dflash`, or a target with no YaRN rope domain
 (`qwen3.6-35b-a3b`). The load summary's
 `rope` row reports the resolved mode, factor, origin, effective ceiling and `mscale`. The practical
 allocation on one RTX 5090 depends on the selected artifact, media workload, output budget, and
@@ -354,7 +358,7 @@ CPU work; the ordinary Engine default queue timeout begins after encoding. Reque
 freed after their GPU consumers finish. A Program-local immutable embedding cache retains at most 128 MiB in FIFO order, keyed by media digest, modality and grid;
 repeated images do not rerun the CPU tower. This cache is separate from the text KV history budget. Large media still consumes host scratch
 space in addition to resident tower weights. CPU placement does not enable Vision on unsupported
-artifacts, TP4, PP2, DFlash or sparse RAM-KV.
+artifacts, TP4, PP2 or DFlash.
 For serving large CPU media, increase `--pending-timeout-ms` (for example `600000`); the server
 default of 30 seconds still covers preparation and can expire during CPU encoding. GUI/TUI select
 600000 ms when CPU Vision is enabled. The deadline is finite and can still reject oversized work.

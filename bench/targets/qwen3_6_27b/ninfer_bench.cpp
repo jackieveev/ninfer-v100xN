@@ -167,9 +167,9 @@ int main(int argc, char** argv) {
         engine_options.pipeline_chunks = options.pipeline_chunks;
         engine_options.devices       = options.devices;
         engine_options.max_context   = max_context;
-        engine_options.ram_kv        = options.ram_kv;
+        engine_options.kvmem         = options.kvmem;
         engine_options.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(
-            options.ram_kv.gpu_tokens != 0 ? options.ram_kv.gpu_tokens : max_context);
+            options.kvmem.enabled() ? options.kvmem.window_tokens() : max_context);
         engine_options.prefill_chunk = options.prefill_chunk;
         engine_options.kv_cache      = options.kv_cache;
         engine_options.speculative.backend       = options.speculative_backend;
@@ -239,7 +239,8 @@ int main(int argc, char** argv) {
                 require_cuda(cudaProfilerStop(), "cudaProfilerStop");
             }
             const ninfer::MemorySummary memory    = engine.memory_summary();
-            env.memory.ram_kv_transfer_bytes       = memory.ram_kv_transfer_bytes;
+            env.memory.kvmem_transfer_bytes        = memory.kvmem_transfer_bytes;
+            env.memory.kvmem_selections            = memory.kvmem_selections;
             result.workspace_peak_bytes           = memory.workspace_logical_peak_bytes;
             result.workspace_allocator_peak_bytes = memory.workspace.peak_used_bytes;
             results.push_back(std::move(result));

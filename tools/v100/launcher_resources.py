@@ -56,7 +56,7 @@ class MemoryOptions:
     vision_device: str = "gpu"
     vision_tokens: int = 1024
     graphs: bool = True
-    ram_window: int = 0
+    kvmem_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ def estimate_memory(path: Path, options: MemoryOptions) -> list[MemoryEstimate]:
         raise ValueError('请选择 TP1/TP2/TP4 或 TP1/PP2')
     if o.context <= 0 or o.chunk <= 0 or o.concurrency <= 0:
         raise ValueError('上下文、chunk 和并发须为正数')
-    capacity = o.ram_window or (o.context if o.capacity in ('', 'auto') else int(o.capacity))
+    capacity = o.kvmem_window or (o.context if o.capacity in ('', 'auto') else int(o.capacity))
     if capacity <= 0:
         raise ValueError('KV 容量须为正数')
     capacity = (capacity + 63) // 64 * 64
@@ -131,7 +131,7 @@ def estimate_memory(path: Path, options: MemoryOptions) -> list[MemoryEstimate]:
     main_kv = capacity * token_bytes // (o.tp * o.pp)
     # Persistent GDN matrix/conv state, plus a conservative speculative-record allowance.
     gdn = 48 * (48 * 128 * 128 * 4 + 10240 * 3 * 2) // (o.tp * o.pp)
-    state = gdn * (2 * o.concurrency + bool(o.ram_window))
+    state = gdn * (2 * o.concurrency + bool(o.kvmem_window))
     if o.backend != 'none':
         state += 64 * MIB * o.concurrency * (o.drafts + 1) // (5 * o.tp * o.pp)
     chunk = min(o.chunk, o.context)
@@ -157,7 +157,7 @@ def estimate_memory(path: Path, options: MemoryOptions) -> list[MemoryEstimate]:
             kv += (capacity + (64 * o.concurrency if o.drafts > 1 else 0)) * token_bytes // (16 * o.tp)
         transient = o.vision_tokens * 5120 * 2 if o.vision and rank == 0 else 0
         results.append(MemoryEstimate(weight, kv, state, int(workspace * 0.85) + transient,
-                                      int(workspace * 1.25) + transient, graph, o.capacity == 'auto' and not o.ram_window,
+                                      int(workspace * 1.25) + transient, graph, o.capacity == 'auto' and not o.kvmem_window,
                                       host_vision_bytes if rank == 0 else 0))
     return results
 

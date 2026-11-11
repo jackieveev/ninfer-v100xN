@@ -504,8 +504,9 @@ capture and transport probes all live in `tools/tp2/`. The 1M needle, soak and p
   on rank 0. TP2 text prefill replicates the composed residual through an ordered peer transfer;
   both ranks receive three-axis MRoPE positions and preserve the per-request RoPE delta during
   decode and reuse. MTP's rank-0 embedding half consumes shifted visual embeddings, including
-  prefix bridges. Vision requests use the normal concurrent decode scheduler. YaRN remains
-  rejected together with `--vision`, because the encoder ropes 2-D image-grid positions.
+  prefix bridges. Vision requests use the normal concurrent decode scheduler. YaRN may
+  combine with `--vision`: the encoder keeps its native 2-D image-grid rope, and only the text
+  MRoPE frequencies use YaRN.
   The local V100X2 visual-prefix bridge test remains unqualified; use the recommended Vision
   server with `--no-prefix-reuse`. See [test status](../../tests/README.md#experimental-tp2-vision-status).
 - **DFlash is rejected at `--tp 2`.** It remains a 35B-A3B text-only backend, and that target has no

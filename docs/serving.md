@@ -1,14 +1,15 @@
 # HTTP serving
 
-Optional native RAM-KV uses the same public Engine and HTTP protocols, not a llama.cpp backend.
-Add `--ram-kv-window 98304 --ram-kv-budget-bytes 32000000000` to a 27B SM70 TP2 Text/MTP
-launch with `--max-context 180000` or `262144`. It supports one active request and CUDA Graphs.
-Omit `--kv-capacity`, or set it equal to the resident window. This is **approximate Q/K mean-vector
-retrieval**, including long prefill, and can miss history. RAM archive bytes are lossless, but that
-does not establish quality equivalence. No Vision/DFlash/TP4 in this mode. The archive budget is
-not an entire-server RAM cap; apply cgroup MemoryMax and disable swap separately when required.
-Server-start JSON records identify the resident window and maximum archive bytes. Default full
-history behavior and the advertised OpenAI/Anthropic request schemas are unchanged.
+Optional KVMem (vendored [KVMem](https://github.com/kvmem/kvmem) core, backend `ninfer-v100`)
+uses the same public Engine and HTTP protocols. Add `--kvmem --kvmem-budget 131072
+--kvmem-gen-reserve 2048 --kvmem-host-mib 37024` to a 27B SM70 TP1/TP2 Text/Vision None/MTP
+launch, e.g. with `--rope yarn --max-context 1048576`. It supports one active request, CUDA Graphs,
+long attention and fast decode. Omit `--kv-capacity`, or set it equal to budget+reserve. This is
+**approximate attention over query-selected 64-token blocks**, including long prefill, and can
+miss history; lossless archive bytes do not establish quality equivalence. No DFlash/TP4/PP2.
+`--kvmem-host-mib` bounds the packed archive, not process RSS. `--kvmem-capabilities` prints the
+backend contract; the startup capacity log reports KVMem budget, window and archive. Default
+full history behavior and the advertised OpenAI/Anthropic request schemas are unchanged.
 
 `build/apps/ninfer-serve` loads one registered artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
@@ -107,7 +108,7 @@ KV, GDN, and scheduling on the primary GPU.
 `--tp 1 --pp 2 --devices 0,1 --max-concurrency 1` selects the experimental SM70
 Qwen3.8 NVFP4/QUASAR layer pipeline through the same Engine and HTTP protocols.
 `--pipeline-chunks 1..8` controls the prefill wave (default 8; 1 is serial).
-It supports Text, None/MTP, prefix reuse and optional sparse RAM-KV; Vision, DFlash, expert storage
+It supports Text, None/MTP and prefix reuse; KVMem, Vision, DFlash, expert storage
 and concurrency above one are rejected. Both prefill and decode use PP2 throughout
 the resident Engine's lifetime; there is no request-time TP/PP switch.
 
@@ -664,7 +665,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
 | `--prefix-cache-tokens N` | historical host KV budget in unique page-rounded Main Text tokens; `0` disables historical branches, preserving current GPU-prefix reuse | `384000` |
-| `--volta-long-attention` | startup-fixed experimental complete-history attention; SM70 27B TP2/TP4, PP1, experimental concurrency 1–8, INT8 KV, Text/None/MTP (Vision on TP2 only); excludes RAM-KV; floating-point association and output IDs may change | off |
+| `--volta-long-attention` | startup-fixed experimental complete-history attention; SM70 27B TP2/TP4, PP1, experimental concurrency 1–8, INT8 KV, Text/None/MTP (Vision on TP2 only); combines with KVMem; floating-point association and output IDs may change | off |
 | `--volta-fast-decode` | experimental QUASAR SM70 TP2/TP4 Text/None/MTP numeric profile: packed NVFP4 FP32 epilogue and MTP W8 reductions; may change logits, acceptance and output; excludes Vision/DFlash/PP2 | off |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..7` on 27B, `1..15` on 35B-A3B | unset |
@@ -848,7 +849,7 @@ budget-spaced actual prefill chunk ends and the final prompt boundary. The early
 the ordinary chunk grid; not every small GPU chunk is copied to RAM. Under the budget, older
 redundant images are evicted, preserving a first and recent checkpoint when two images fit.
 Capture/restore transfer time is included
-in prefill timing. `--no-prefix-reuse` also skips these captures. Vision, DFlash and sparse RAM-KV
+in prefill timing. `--no-prefix-reuse` also skips these captures. Vision, DFlash and KVMem
 keep the existing frontier/turn/response rules and do not archive historical branches.
 See [prefix state ownership](maintainer/paged-kv-cache.md#10-prefix-reuse).
 
@@ -916,7 +917,7 @@ CPU work; the ordinary Engine default queue timeout begins after encoding. Reque
 freed after their GPU consumers finish. A Program-local immutable embedding cache retains at most 128 MiB in FIFO order, keyed by media digest, modality and grid;
 repeated images do not rerun the CPU tower. This cache is separate from the text KV history budget. Large media still consumes host scratch
 space in addition to resident tower weights. CPU placement does not enable Vision on unsupported
-artifacts, TP4, PP2, DFlash or sparse RAM-KV.
+artifacts, TP4, PP2 or DFlash.
 For serving large CPU media, increase `--pending-timeout-ms` (for example `600000`); the server
 default of 30 seconds still covers preparation and can expire during CPU encoding. GUI/TUI select
 600000 ms when CPU Vision is enabled. The deadline is finite and can still reject oversized work.

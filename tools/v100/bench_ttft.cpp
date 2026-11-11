@@ -32,7 +32,7 @@ int run(int argc, char** argv) {
     require(p.at("tp") == "2" && p.at("pp") == "1" && p.at("devices") == "0,1" &&
         p.at("spec") == "mtp" && p.at("draft_tokens") == 4 && p.at("lm_head_draft") == true &&
         p.at("max_concurrency") == 1 && p.at("kv_dtype") == "int8" &&
-        p.at("kv_capacity") == "" && p.at("ram_kv") == false,
+        p.at("kv_capacity") == "" && p.at("kvmem") == false,
         "TTFT measurement requires TP2/MTP4 optimized head, full INT8 KV and one request");
     ninfer::EngineOptions options;
     options.artifact_path = argv[1];

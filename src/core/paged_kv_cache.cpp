@@ -307,7 +307,8 @@ struct PagedKVAllocation::RamState {
     std::size_t bytes = 0;
     std::vector<std::size_t> plane_offsets;
     std::vector<bool> archived;
-    std::vector<std::int32_t> preferred;
+    std::vector<std::int32_t> selected;
+    std::uint32_t pinned_from = 0;
     mutable std::vector<std::int32_t> indices;
     mutable std::vector<std::int32_t> table;
     std::uint32_t resident = 0;
@@ -498,9 +499,11 @@ void PagedKVAllocation::release() noexcept {
     pool_             = nullptr;
 }
 
-void PagedKVAllocation::prefer_pages(std::span<const std::int32_t> ranked_pages) {
-    if (!ram_) { throw std::logic_error("page ranking requires RAM KV"); }
-    ram_->preferred.assign(ranked_pages.begin(), ranked_pages.end());
+void PagedKVAllocation::select_pages(std::span<const std::int32_t> selected_pages,
+                                     std::uint32_t pinned_from) {
+    if (!ram_) { throw std::logic_error("page selection requires a RAM archive"); }
+    ram_->selected.assign(selected_pages.begin(), selected_pages.end());
+    ram_->pinned_from = pinned_from;
     ram_->dirty = true;
 }
 
@@ -533,20 +536,21 @@ void PagedKVAllocation::materialize_ram_pages(std::uint32_t pages, cudaStream_t 
     page_ids_.resize(pages, -1);
     std::vector<bool> wanted(pages, false);
     std::uint32_t count = 0;
-    const auto add = [&](std::uint32_t p) {
-        if (p < pages && !wanted[p] && count < page_entitlement_) {
-            wanted[p] = true; ++count;
+    const auto add = [&](std::uint32_t p, bool mandatory) {
+        if (p >= pages || wanted[p]) { return; }
+        if (count == page_entitlement_) {
+            if (mandatory) { throw std::logic_error("RAM KV working set exceeds the GPU window"); }
+            return;
         }
+        wanted[p] = true; ++count;
     };
-    // Every append page is mandatory, then a 4K recent band and a 512-token sink.
-    // Existing selected pages stay physically in place. Original order is restored only in
-    // the read table, never by moving resident payloads.
-    for (auto p = ram_->required_begin; p < std::min(pages, ram_->required_end); ++p) { add(p); }
-    for (auto p = old_pages; p < pages; ++p) { add(p); }
-    for (auto p = pages; p > (pages > 64 ? pages - 64 : 0);) { add(--p); }
-    for (std::uint32_t p = 0; p < std::min(8U, pages); ++p) { add(p); }
-    for (auto p : ram_->preferred) { if (p >= 0) { add(static_cast<std::uint32_t>(p)); } }
-    for (auto p = pages; p != 0;) { add(--p); }
+    // Required, appended and post-selection pages are mandatory; the selection fills the rest
+    // in retention order. Resident pages stay physically in place. Original order is restored
+    // only in the read table, never by moving resident payloads.
+    for (auto p = ram_->required_begin; p < std::min(pages, ram_->required_end); ++p) { add(p, true); }
+    for (auto p = old_pages; p < pages; ++p) { add(p, true); }
+    for (auto p = ram_->pinned_from; p < pages; ++p) { add(p, true); }
+    for (auto p : ram_->selected) { if (p >= 0) { add(static_cast<std::uint32_t>(p), false); } }
 
     const auto copy_run = [&](std::uint32_t logical, std::int32_t physical, std::uint32_t count, bool to_ram) {
         for (std::size_t p = 0; p < pool_->plane_count(); ++p) {

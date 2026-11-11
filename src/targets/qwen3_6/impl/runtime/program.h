@@ -11,6 +11,7 @@
 
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
+#include "targets/qwen3_6/impl/runtime/kvmem_session.h"
 #include "targets/qwen3_6/impl/runtime/linear_state_slots.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
@@ -225,8 +226,10 @@ struct SequenceState {
     // When set, the committed GDN state lives in this lane's complete owned RAM
     // checkpoint at this frontier; the current GPU GDN slot is not readable yet.
     std::optional<std::uint32_t> deferred_prefix_state;
-    TokenSpan ram_query;
-    std::uint32_t ram_rank_frontier = 0;
+    std::unique_ptr<qwen3_6::detail::KvMemSession> kvmem;
+    // Original prompt RoPE minus cache position per page, frozen at request start.
+    std::vector<std::int32_t> kvmem_rope_offsets;
+    bool kvmem_query_selected = false;
 };
 
 // Request/round control is not retained with a reusable SequenceState. A later concurrent Engine
@@ -361,7 +364,7 @@ public:
     const std::uint32_t prefix_cache_tokens;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
-    const RamKvOptions ram_kv;
+    const KvMemOptions kvmem;
     const bool volta_long_attention;
     const SpeculativeBackend speculative_backend;
     const DType kv_dtype;
@@ -557,7 +560,15 @@ private:
     void unbind_sequence_kv(SequenceState& sequence) noexcept;
     void materialize_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                                  std::uint32_t backend_tokens = 0);
-    void refresh_ram_kv(SequenceState& sequence, std::uint32_t frontier);
+    void kvmem_summarize(SequenceState& sequence, std::uint32_t frontier);
+    std::vector<float> kvmem_page_means(SequenceState& sequence, std::uint32_t first,
+                                        std::uint32_t count);
+    void kvmem_apply(SequenceState& sequence, std::vector<std::uint32_t> selected,
+                     std::uint32_t frontier);
+    void kvmem_reserve(SequenceState& sequence, std::uint32_t frontier, std::uint32_t end);
+    void kvmem_select_query(SequenceState& sequence, std::uint32_t frontier);
+    void kvmem_begin(SequenceState& sequence, const PreparedPromptData& prompt,
+                     std::uint32_t base);
     [[nodiscard]] std::size_t prefix_checkpoint_bytes() const;
     void save_prefix_checkpoint(SequenceState& sequence, std::uint32_t frontier, const Tensor& hidden);
     PrefixCheckpoint capture_prefix_checkpoint(SequenceState& sequence, std::uint32_t frontier,

@@ -154,26 +154,32 @@ class LaunchContract(unittest.TestCase):
                 self.settings.validate()
             setattr(self.settings, name, before)
 
-    def test_pipeline_and_ram_kv_admission_and_restore(self):
+    def test_pipeline_and_kvmem_admission_and_restore(self):
         self.settings.pp, self.settings.tp = 2, 1
-        self.settings.ram_kv = True
         self.settings.validate()
         command = self.settings.command()
-        for option, value in (('--pp', '2'), ('--pipeline-chunks', '8'),
-                              ('--ram-kv-window', '32768'), ('--kv-capacity', '32768')):
+        for option, value in (('--pp', '2'), ('--pipeline-chunks', '8')):
             self.assertEqual(command[command.index(option) + 1], value)
-        self.settings.ram_window = 8192
-        with self.assertRaisesRegex(ValueError, 'window'):
+        self.settings.kvmem = True
+        with self.assertRaisesRegex(ValueError, 'KVMem'):
             self.settings.validate()
-        self.settings.ram_window = 32768
-        self.settings.vision = True
-        with self.assertRaisesRegex(ValueError, 'PP2'):
+        self.settings.pp, self.settings.tp = 1, 2
+        self.settings.devices = '0,1'
+        self.settings.validate()
+        command = self.settings.command()
+        self.assertIn('--kvmem', command)
+        for option, value in (('--kvmem-budget', '32768'), ('--kvmem-gen-reserve', '2560'),
+                              ('--kvmem-host-mib', '16384')):
+            self.assertEqual(command[command.index(option) + 1], value)
+        self.assertNotIn('--kv-capacity', command)
+        self.settings.kvmem_reserve = 512
+        with self.assertRaisesRegex(ValueError, 'reserve'):
             self.settings.validate()
         self.settings.apply_profile('quasar-mtp4')
         self.settings.artifact = str(self.artifact)
         self.settings.validate()
         self.assertEqual(self.settings.pp, 1)
-        self.assertFalse(self.settings.ram_kv)
+        self.assertFalse(self.settings.kvmem)
         self.assertNotIn('--pp', self.settings.command())
 
     def test_session_metrics_skip_historical_log_and_reset_on_start(self):

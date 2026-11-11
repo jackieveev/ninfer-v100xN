@@ -103,7 +103,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         throw std::invalid_argument("sequence plan tp must be 1, 2 or 4");
     }
     const std::int32_t linear_state_slots =
-        LinearStateSlots::state_slot_count(plan.max_concurrency) + (plan.ram_kv.gpu_tokens != 0 ? 1 : 0);
+        LinearStateSlots::state_slot_count(plan.max_concurrency) + (plan.kvmem.enabled() ? 1 : 0);
     const auto effective_prefill_chunk =
         static_cast<std::int32_t>(std::min(plan.prefill_chunk, plan.capacity));
     const std::uint32_t logical_pages  = page_count(plan.capacity);
@@ -132,7 +132,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
                      .text_physical_page_groups = physical_pages,
                      .mtp_physical_page_groups  = mtp_physical_pages,
-                     .ram_kv                    = plan.ram_kv.gpu_tokens != 0,
+                     .kvmem                     = plan.kvmem.enabled(),
                      .linear_attention =
                          {
                              .layers         = static_cast<std::uint32_t>(TextConfig::gdn_layers() / plan.pp),
@@ -255,7 +255,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const auto chunk  = static_cast<std::int32_t>(chunk_u32);
     const auto drafts = static_cast<std::int32_t>(plan.draft_window);
     const auto verify = drafts + 1;
-    const ops::GqaExecutionEnvelope text_envelope{1, plan.ram_kv.gpu_tokens != 0
+    const ops::GqaExecutionEnvelope text_envelope{1, plan.kvmem.enabled()
         ? std::min(plan.capacity, plan.kv_capacity + (plan.features.mtp() ? 64U : 0U))
         : plan.capacity, plan.volta_long_attention};
 
@@ -662,7 +662,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     out.capacity = std::max({out.text_prefill, out.ordinary_round, out.mtp_prefill, out.mtp_round,
                              out.dflash_context, out.dflash_round, out.vision_encode});
-    if (plan.ram_kv.gpu_tokens != 0) {
+    if (plan.kvmem.enabled()) {
         // Each attention invocation holds its remapped I32 positions across the existing Op.
         const std::size_t extra = ((std::max(chunk_u32, plan.draft_window + 1U) * 4ULL + 255) /
                                   256 + 1) * 256;
@@ -688,26 +688,34 @@ std::uint32_t validate_target_options(DeviceContext& device, const EngineOptions
     }
     if (options.volta_long_attention &&
         (TextConfig::query_heads != 24 || device.sm() != 70 || (options.tp != 2 && options.tp != 4) || options.pp != 1 ||
-         options.kv_cache != KvCacheStorage::Int8Group64 || options.ram_kv.gpu_tokens != 0 ||
+         options.kv_cache != KvCacheStorage::Int8Group64 ||
          options.speculative.backend == SpeculativeBackend::DFlash)) {
         throw std::invalid_argument("Volta long attention requires SM70 27B TP2/TP4 Text/None/MTP (Vision on TP2 only) with complete INT8 KV");
     }
-    if (options.ram_kv.gpu_tokens != 0) {
+    if (options.kvmem.enabled()) {
+        const KvMemOptions& memory = options.kvmem;
         if constexpr (TextConfig::query_heads != 24) {
-            throw std::invalid_argument("RAM KV is supported only by the 27B package");
+            throw std::invalid_argument("KVMem is supported only by the 27B package");
         }
-        if (options.tp > 2 || options.max_concurrency != 1 || options.enable_vision ||
+        if (options.tp > 2 || options.pp != 1 || options.max_concurrency != 1 ||
             options.speculative.backend == SpeculativeBackend::DFlash || device.sm() != 70) {
-            throw std::invalid_argument("RAM KV requires SM70 TP1/TP2, one Text/MTP request");
+            throw std::invalid_argument("KVMem requires SM70 TP1/TP2, one Text/Vision None/MTP request");
         }
-        if (options.ram_kv.gpu_tokens % kPagedKVPageSize != 0 ||
-            options.ram_kv.gpu_tokens < options.prefill_chunk * (options.pp == 2 ? options.pipeline_chunks : 1U) + 8192 ||
-            options.ram_kv.gpu_tokens > options.max_context || options.ram_kv.budget_bytes == 0) {
-            throw std::invalid_argument("RAM KV GPU window must be page-aligned, at least prefill_chunk+8192, and no larger than max_context");
+        if (memory.budget_tokens < 128 || memory.budget_tokens % kPagedKVPageSize != 0 ||
+            memory.gen_reserve_tokens < kPagedKVPageSize ||
+            memory.gen_reserve_tokens % kPagedKVPageSize != 0 ||
+            memory.window_tokens() < 256 || memory.window_tokens() > options.max_context ||
+            memory.sink_tokens + memory.recent_tokens > memory.budget_tokens ||
+            memory.host_bytes == 0) {
+            throw std::invalid_argument("KVMem requires B>=128 and R>=64 in 64-token blocks, "
+                                        "256<=B+R<=max_context, and sink+recent<=B");
+        }
+        if (options.prefill_chunk > memory.gen_reserve_tokens) {
+            throw std::invalid_argument("KVMem requires prefill_chunk <= gen_reserve");
         }
         if (options.kv_capacity.mode != KvCapacityMode::Explicit ||
-            options.kv_capacity.explicit_tokens != options.ram_kv.gpu_tokens) {
-            throw std::invalid_argument("RAM KV requires kv_capacity equal to its GPU window");
+            options.kv_capacity.explicit_tokens != memory.window_tokens()) {
+            throw std::invalid_argument("KVMem requires kv_capacity equal to budget + gen_reserve");
         }
     }
     // This call is also where every rope-option rejection lives (unsupported variant, Vision,
@@ -726,17 +734,17 @@ std::uint32_t validate_target_options(DeviceContext& device, const EngineOptions
         throw std::invalid_argument("vision_max_tokens must be in [1,32768]");
     }
     const std::uint32_t logical_pages = page_count(options.max_context);
-    const std::uint32_t minimum_pages = options.ram_kv.gpu_tokens != 0
-        ? page_count(options.ram_kv.gpu_tokens) : std::max(logical_pages, options.max_concurrency);
+    const std::uint32_t minimum_pages = options.kvmem.enabled()
+        ? page_count(options.kvmem.window_tokens()) : std::max(logical_pages, options.max_concurrency);
     const std::uint64_t maximum_pages64 =
-        options.ram_kv.gpu_tokens != 0 ? minimum_pages :
+        options.kvmem.enabled() ? minimum_pages :
         static_cast<std::uint64_t>(options.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("maximum Main KV page count exceeds uint32");
     }
     switch (options.kv_capacity.mode) {
     case KvCapacityMode::Explicit: {
-        if (options.ram_kv.gpu_tokens == 0 && options.kv_capacity.explicit_tokens < options.max_context) {
+        if (!options.kvmem.enabled() && options.kv_capacity.explicit_tokens < options.max_context) {
             throw std::invalid_argument("kv_capacity must be at least max_context");
         }
         const std::uint32_t requested_pages = page_count(options.kv_capacity.explicit_tokens);
@@ -830,13 +838,13 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->tp                  = inputs.tp;
     impl->pp                  = inputs.pp;
     impl->pipeline_chunks     = inputs.pipeline_chunks;
-    impl->ram_kv              = inputs.ram_kv;
+    impl->kvmem               = inputs.kvmem;
     impl->prefix_cache_tokens = inputs.prefix_cache_tokens;
     impl->volta_long_attention = inputs.volta_long_attention;
     impl->kv_dtype            = inputs.kv_dtype;
     impl->kv_quant_group      = inputs.kv_quant_group;
     impl->persistent          = persistent_layout(*impl);
-    if (inputs.ram_kv.gpu_tokens != 0) {
+    if (inputs.kvmem.enabled()) {
         std::uint64_t archive = 0;
         const auto add_archive = [&](const qwen3_6::PagedKVCacheLayout& cache) {
             for (const auto& plane : cache.pool.planes) {
@@ -846,8 +854,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
         };
         add_archive(impl->persistent.decoder.text_kv);
         if (impl->persistent.decoder.mtp_kv) { add_archive(*impl->persistent.decoder.mtp_kv); }
-        if (archive * inputs.tp * inputs.pp > inputs.ram_kv.budget_bytes) {
-            throw std::invalid_argument("packed RAM KV archive exceeds configured host budget");
+        if (archive * inputs.tp * inputs.pp > inputs.kvmem.host_bytes) {
+            throw std::invalid_argument("KVMem packed archive for max_context exceeds --kvmem-host-mib");
         }
     }
     impl->workspace           = build_workspace_plan(*impl);
@@ -972,15 +980,15 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
         .tp             = options.tp,
         .pp             = options.pp,
         .pipeline_chunks = options.pp == 2 ? options.pipeline_chunks : 1U,
-        .ram_kv         = options.ram_kv,
+        .kvmem          = options.kvmem,
         .prefix_cache_tokens = options.prefix_cache_tokens,
         .volta_long_attention = options.volta_long_attention,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
-    const std::uint32_t minimum_pages = inputs.ram_kv.gpu_tokens != 0
-        ? page_count(inputs.ram_kv.gpu_tokens) : std::max(logical_pages, inputs.max_concurrency);
+    const std::uint32_t minimum_pages = inputs.kvmem.enabled()
+        ? page_count(inputs.kvmem.window_tokens()) : std::max(logical_pages, inputs.max_concurrency);
     const std::uint64_t maximum_pages64 =
-        inputs.ram_kv.gpu_tokens != 0 ? minimum_pages :
+        inputs.kvmem.enabled() ? minimum_pages :
         static_cast<std::uint64_t>(inputs.max_concurrency) * logical_pages;
     if (maximum_pages64 > std::numeric_limits<std::uint32_t>::max()) {
         throw std::overflow_error("maximum Main KV page count exceeds uint32");

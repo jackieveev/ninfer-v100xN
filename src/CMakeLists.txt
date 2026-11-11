@@ -401,8 +401,20 @@ add_subdirectory(targets/qwen3_6)
 add_subdirectory(targets/qwen3_6_27b)
 add_subdirectory(targets/qwen3_6_35b_a3b)
 
+# KVMem core (github.com/kvmem/kvmem, vendored kvmem/ directory) with its CUDA page-softmax scorer.
+add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/kvmem ${PROJECT_BINARY_DIR}/kvmem-core EXCLUDE_FROM_ALL)
+kvmem_enable_cuda_recall(CUDART_TARGET ${NINFER_CUDART_TARGET})
+
+# Canonical KVMem launch flags resolved for the ninfer-v100 backend (CLI, server, benchmarks).
+add_library(ninfer_product_kvmem_options STATIC
+  product/kvmem_options/kvmem_options.cpp)
+ninfer_internal_includes(ninfer_product_kvmem_options)
+target_include_directories(ninfer_product_kvmem_options PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(ninfer_product_kvmem_options PRIVATE kvmem)
+
 target_link_libraries(ninfer_engine
   PRIVATE
+    kvmem
     ninfer_artifact
     ninfer_core
     ninfer_ops
@@ -430,5 +442,5 @@ if(NINFER_BUILD_SERVE)
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
-    PRIVATE ninfer_media_acquire CUDA::cudart)
+    PRIVATE ninfer_media_acquire ninfer_product_kvmem_options CUDA::cudart)
 endif()

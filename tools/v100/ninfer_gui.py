@@ -306,12 +306,13 @@ class NInferGui(QWidget):
         self.vision_max_tokens.setToolTip("每个请求的图片/视频合计视觉 token 上限；增加会占用更多显存。")
         self.volta_fast_decode = QCheckBox("实验：NVFP4 / MTP 快速数值路径")
         self.volta_long_attention = QCheckBox("实验：完整历史长注意力（文本 / 图片 / 视频）")
-        self.ram_kv = QCheckBox("实验：RAM-KV 近似历史检索")
-        self.ram_window = self._spin(32768, 64, 262144, 64)
-        self.ram_budget = QLineEdit("32000000000")
-        self.ram_kv.setToolTip("默认关闭；prefill 和 decode 都可能只关注检索到的历史，可能降低长上下文质量。\n"
-                               "本配置无确定速度/GPQA数据；RAM archive 预算不等于进程 RSS 限制。\n"
-                               "KV 容量启用时自动等于 GPU window。与视觉、DFlash、TP4、长注意力互斥。")
+        self.kvmem = QCheckBox("KVMem 长上下文记忆（块稀疏）")
+        self.kvmem_budget = self._spin(32768, 128, 1048576, 64)
+        self.kvmem_reserve = self._spin(2560, 64, 65536, 64)
+        self.kvmem_host_mib = self._spin(16384, 1, 1048576, 1024)
+        self.kvmem.setToolTip("对应 --kvmem；默认关闭。GPU KV 窗口 = 预算 + 生成预留，其余历史以原始打包 KV 存入主机 RAM。\n"
+                              "按查询选择 64-token 块，注意力相对完整历史为近似；支持 TP1/TP2、并发1、文本/视觉 None/MTP、长注意力与快速数值。\n"
+                              "主机 MiB 限制整段 max_context 的打包 KV 归档，不是进程 RSS 限制。")
         self.volta_fast_decode.setToolTip(
             "对应 --volta-fast-decode；QUASAR / SM70 / TP2/TP4 / 纯文本 None/MTP。\n"
             "NVFP4 FP32 末尾缩放、MTP W8 重排与归约；可能改变 logits、草稿接受和输出。\n"
@@ -325,7 +326,7 @@ class NInferGui(QWidget):
             "对应 --volta-long-attention；SM70 27B / TP2/TP4（视觉仅 TP2）/ INT8 KV / 并发1–8 / 文本或视觉 None/MTP。\n"
             "保留全部历史 KV，改变 softmax/PV 累加顺序；可能改变输出。\n"
             "纯文本与快速数值路径组合约 198.1 tok/s，不代表视觉或此开关单项收益；当前组合 GPQA 未测。\n"
-            "默认关闭，需重启 API；不能与 DFlash 或 RAM-KV 一起使用；视觉可用，快速数值路径仍仅限文本。")
+            "默认关闭，需重启 API；不能与 DFlash 一起使用；视觉可用，快速数值路径仍仅限文本。")
         self.max_concurrency = self._spin(1, 1, 8, 1)
         self.default_max_tokens = self._spin(65536, 1, 1048576, 1024)
         self.api_key = QLineEdit()
@@ -409,12 +410,13 @@ class NInferGui(QWidget):
         experimental = QFormLayout()
         experimental.addRow(self.volta_fast_decode)
         experimental.addRow(self.volta_long_attention)
-        experimental.addRow(self.ram_kv)
-        experimental.addRow("RAM-KV GPU tokens", self.ram_window)
-        experimental.addRow("RAM archive bytes", self.ram_budget)
+        experimental.addRow(self.kvmem)
+        experimental.addRow("KVMem 预算 tokens", self.kvmem_budget)
+        experimental.addRow("KVMem 生成预留 tokens", self.kvmem_reserve)
+        experimental.addRow("KVMem 主机归档 MiB", self.kvmem_host_mib)
         experimental.addRow("流水线 PP", self.pp)
         experimental.addRow("PP prefill chunks", self.pipeline_chunks)
-        attention_note = QLabel("长注意力支持 TP2 图片/视频；快速数值路径仅限文本。数值实验可能改变输出；RAM-KV 使用近似注意力。")
+        attention_note = QLabel("长注意力支持 TP2 图片/视频；快速数值路径仅限文本。数值实验可能改变输出；KVMem 使用近似注意力。")
         attention_note.setObjectName('muted')
         attention_note.setWordWrap(True)
         experimental.addRow(attention_note)
@@ -598,7 +600,7 @@ class NInferGui(QWidget):
             widget.toggled.connect(self._refresh_command)
         self.spec.currentTextChanged.connect(self._spec_changed)
         self.vision.toggled.connect(self._vision_changed)
-        self.ram_kv.toggled.connect(self._update_feature_controls)
+        self.kvmem.toggled.connect(self._update_feature_controls)
         self.pp.currentTextChanged.connect(self._update_feature_controls)
         self.kv_capacity_toggle.toggled.connect(self._toggle_kv_capacity)
         self.config_selector.currentIndexChanged.connect(
@@ -654,11 +656,12 @@ class NInferGui(QWidget):
                                Path("/Models/ninfer-V100X2/quasar-v3/qwen3_8_27b_nvfp4.ninfer")])
 
     def _option_widgets(self) -> dict:
-        names = ("binary artifact host devices kv_capacity ram_budget temperature top_p top_k min_p "
+        names = ("binary artifact host devices kv_capacity temperature top_p top_k min_p "
                  "presence_penalty frequency_penalty seed port max_context prefill_chunk draft_tokens "
-                 "vision_max_tokens pipeline_chunks ram_window max_concurrency default_max_tokens "
+                 "vision_max_tokens pipeline_chunks kvmem_budget kvmem_reserve kvmem_host_mib "
+                 "max_concurrency default_max_tokens "
                  "tp pp kv_dtype spec lm_head_draft cuda_graph prefix_reuse prefix_cache_tokens volta_long_attention "
-                 "volta_fast_decode vision vision_device ram_kv no_thinking preserve_thinking greedy cors")
+                 "volta_fast_decode vision vision_device kvmem no_thinking preserve_thinking greedy cors")
         return {name: getattr(self, name) for name in names.split()}
 
     def configuration(self) -> dict:
@@ -847,8 +850,8 @@ class NInferGui(QWidget):
             "纯文本数值路径 + 长注意力：85K 输入、MTP4、greedy 下组合约 198.1 tok/s；末步 W8 约 +0.84%。\n"
             "不是各开关的独立增幅。前序组合 25 点 argmax 一致，最小 cosine 0.998831，最大 KL 0.001903；\n"
             "near-lossless 仅 9/25 通过，当前组合未测 GPQA。可能改变输出和草稿接受位置。\n\n"
-            "RAM-KV 在长 prefill 和 decode 中使用检索历史，可能降低长上下文质量；收益未测。\n"
-            "RAM archive 预算不是进程 RSS 上限。PP2 无确定速度增幅。\n"
+            "KVMem 在长 prefill 和 decode 中只关注选中的 64-token 块，可能降低长上下文质量。\n"
+            "KVMem 主机归档预算不是进程 RSS 上限。PP2 无确定速度增幅。\n"
             "实验默认关闭；模型与硬件准入仍由引擎检查。")
 
     def _local_path(self, text: str) -> Path:
@@ -874,7 +877,7 @@ class NInferGui(QWidget):
             return "实验 PP2 要求 TP1、两卡、并发1、NVFP4/QUASAR 纯文本 None/MTP；关闭两个数值实验"
         if self.volta_long_attention.isChecked() and (
                 tp not in (2, 4) or self.kv_dtype.currentText() != "int8" or
-                self.ram_kv.isChecked() or spec not in {"none", "mtp"}):
+                spec not in {"none", "mtp"}):
             return ("实验性长上下文注意力要求 TP2/TP4、INT8 KV、并发 1–8、后端为 none 或 mtp、视觉仅支持 TP2；"
                     "请调整配置或取消勾选该开关。硬件和模型还须为 SM70 27B。")
         if self.volta_fast_decode.isChecked() and (tp not in (2, 4) or self.vision.isChecked() or
@@ -897,19 +900,17 @@ class NInferGui(QWidget):
         if self.prefill_chunk.value() % 128:
             return "Prefill chunk 必须为 128 的正整数倍"
         capacity = self.kv_capacity.text().strip()
-        if not self.ram_kv.isChecked() and capacity and capacity != "auto" and (not capacity.isdecimal() or int(capacity) < self.max_context.value()):
+        if not self.kvmem.isChecked() and capacity and capacity != "auto" and (not capacity.isdecimal() or int(capacity) < self.max_context.value()):
             return (f"KV 容量“{capacity}”无效，当前最大上下文为 {self.max_context.value()}。\n"
                     f"请填 auto，或不小于 {self.max_context.value()} 的整数；清空则跟随最大上下文。")
-        if self.ram_kv.isChecked():
-            if self.vision.isChecked() or spec == "dflash" or tp == 4 or self.max_concurrency.value() != 1:
-                return "实验 RAM-KV 要求 TP1/TP2/PP2、并发1、纯文本 None/MTP"
-            minimum = self.prefill_chunk.value() * (self.pipeline_chunks.value() if pp == 2 else 1) + 8192
-            window = self.ram_window.value()
-            if window % 64 or not minimum <= window <= self.max_context.value():
-                return f"RAM-KV 窗口须为64倍数，且位于 {minimum}..{self.max_context.value()}"
-            budget = self.ram_budget.text().strip()
-            if not budget.isdecimal() or not 0 < int(budget) <= 18446744073709551615:
-                return "RAM archive 预算须为正 uint64 字节数，不是进程 RSS 上限"
+        if self.kvmem.isChecked():
+            if spec == "dflash" or tp == 4 or pp != 1 or self.max_concurrency.value() != 1:
+                return "KVMem 要求 TP1/TP2、PP1、并发1、文本/视觉 None/MTP"
+            budget, reserve = self.kvmem_budget.value(), self.kvmem_reserve.value()
+            if budget % 64 or reserve % 64 or reserve < self.prefill_chunk.value():
+                return "KVMem 预算/生成预留须为64倍数，且生成预留不小于 prefill chunk"
+            if budget + reserve > self.max_context.value():
+                return f"KVMem 预算 + 生成预留不能超过最大上下文 {self.max_context.value()}"
         if artifact.name == "qwen3_8_27b_fp8.ninfer" and tp != 4:
             return "原生 FP8 产物要求 TP4；请设置 TP4 和四个设备 ID"
         for name, field in self._sampling_fields():
@@ -931,9 +932,10 @@ class NInferGui(QWidget):
         spec = self.spec.currentText()
         if self.pp.currentText() != "1":
             args += ["--pp", self.pp.currentText(), "--pipeline-chunks", str(self.pipeline_chunks.value())]
-        if self.ram_kv.isChecked():
-            args += ["--ram-kv-window", str(self.ram_window.value()), "--kv-capacity", str(self.ram_window.value()),
-                     "--ram-kv-budget-bytes", self.ram_budget.text().strip()]
+        if self.kvmem.isChecked():
+            args += ["--kvmem", "--kvmem-budget", str(self.kvmem_budget.value()),
+                     "--kvmem-gen-reserve", str(self.kvmem_reserve.value()),
+                     "--kvmem-host-mib", str(self.kvmem_host_mib.value())]
         elif self.kv_capacity.text().strip():
             args += ["--kv-capacity", self.kv_capacity.text().strip()]
         if spec != "none":
@@ -986,8 +988,8 @@ class NInferGui(QWidget):
 
     def _refresh_command(self, *_args) -> None:
         self._set_command(self._command())
-        if self.ram_kv.isChecked():
-            self.kv_capacity_hint.setText("RAM-KV 已启用：GPU 容量使用实验页的 GPU window。")
+        if self.kvmem.isChecked():
+            self.kv_capacity_hint.setText("KVMem 已启用：GPU KV 容量 = 预算 + 生成预留。")
         else:
             self.kv_capacity_hint.setText(
                 f"留空跟随上下文（{self.max_context.value()} token）；auto 按可用显存选择。\n"
@@ -1002,7 +1004,8 @@ class NInferGui(QWidget):
             backend=self.spec.currentText(), drafts=self.draft_tokens.value(),
             optimized=self.lm_head_draft.isChecked(), concurrency=self.max_concurrency.value(),
             vision=self.vision.isChecked(), vision_device=self.vision_device.currentText(), vision_tokens=self.vision_max_tokens.value(),
-            graphs=self.cuda_graph.isChecked(), ram_window=self.ram_window.value() if self.ram_kv.isChecked() else 0)
+            graphs=self.cuda_graph.isChecked(), kvmem_window=self.kvmem_budget.value() + self.kvmem_reserve.value()
+            if self.kvmem.isChecked() else 0)
 
     def _refresh_memory_estimate(self) -> None:
         try:
@@ -1104,17 +1107,16 @@ class NInferGui(QWidget):
             self.volta_fast_decode.setChecked(False)
             # Vision starts with cold requests; users may enable prefix reuse.
             self.prefix_reuse.setChecked(False)
-            self.ram_kv.setChecked(False)
         self._update_feature_controls()
 
     def _update_feature_controls(self, *_args) -> None:
         self.vision_device.setEnabled(self.vision.isChecked())
         self.vision_max_tokens.setEnabled(self.vision.isChecked())
         self.pipeline_chunks.setEnabled(self.pp.currentText() == "2")
-        self.ram_window.setEnabled(self.ram_kv.isChecked())
-        self.ram_budget.setEnabled(self.ram_kv.isChecked())
-        self.kv_capacity.setEnabled(not self.ram_kv.isChecked())
-        self.kv_capacity_toggle.setEnabled(not self.ram_kv.isChecked())
+        for widget in (self.kvmem_budget, self.kvmem_reserve, self.kvmem_host_mib):
+            widget.setEnabled(self.kvmem.isChecked())
+        self.kv_capacity.setEnabled(not self.kvmem.isChecked())
+        self.kv_capacity_toggle.setEnabled(not self.kvmem.isChecked())
 
     def _toggle_kv_capacity(self, expanded: bool) -> None:
         self.kv_capacity_panel.setVisible(expanded)

@@ -198,8 +198,9 @@ public:
                             std::span<const std::byte> image, cudaStream_t stream);
 
     void release() noexcept;
-    // Ranking is storage-policy input supplied by the model family, not interpreted by core.
-    void prefer_pages(std::span<const std::int32_t> ranked_pages);
+    // Resident working set chosen by the memory policy, in retention order. Pages at or after
+    // pinned_from were appended since that selection and are never evicted by it.
+    void select_pages(std::span<const std::int32_t> selected_pages, std::uint32_t pinned_from);
     // A PP prefill wave may contain multiple not-yet-written chunks in already mapped pages.
     void require_pages(std::uint32_t begin, std::uint32_t end);
     [[nodiscard]] std::uint64_t ram_transfer_bytes() const noexcept;

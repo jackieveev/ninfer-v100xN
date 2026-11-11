@@ -55,8 +55,7 @@ page identifiers in the two layer-local KV pools.
 Ordinary/MTP target verification visits both stages serially, including one captured
 multi-device CUDA Graph. MTP proposal, acceptance and output publication remain primary
 owned; each stage folds its own GDN replay records for the committed prefix.
-Vision/DFlash/expert storage and C>1 are not admitted. Optional RAM-KV pins every wave's
-write pages and freezes both stages' read tables until the wave completes. This is not a second
+KVMem/Vision/DFlash/expert storage and C>1 are not admitted. This is not a second
 Engine lane and does not introduce request-time TP/PP migration.
 
 ### 1.3 Required sequence-state substrate
@@ -738,7 +737,7 @@ Retained prefix 是从已结束 request 中分离出来的、单一 owner 的 Se
 但该 lane 的 control slot 对 scheduler 是 free。Retained state 只发布 target 已保存完整 continuation state
 的 checkpoints。当前 Qwen3.6 retained state 可以发布 current resume frontier，以及一份有效时的 typed
 rewrite checkpoint，以及普通 Text/None/MTP 的有界 RAM prefix checkpoints（完整 GPU KV，
-不含 Vision/DFlash/RAM-KV）。Typed checkpoint 按捕获时的用途标记为 `TurnClosure` 或 `ResponseReplay`；两种 kind 互斥复用同一
+不含 Vision/DFlash/KVMem）。Typed checkpoint 按捕获时的用途标记为 `TurnClosure` 或 `ResponseReplay`；两种 kind 互斥复用同一
 份物理 payload，并额外保存对应的 recurrent、hidden、speculative-backend 和 position state，不复制 KV
 payload。
 

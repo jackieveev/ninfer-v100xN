@@ -1,4 +1,5 @@
 #include "options.h"
+#include "product/kvmem_options/kvmem_options.h"
 #include "product/speculative_options.h"
 
 #include <cerrno>
@@ -123,7 +124,7 @@ std::string usage_text(const char* argv0) {
            "       [--rope native|yarn] [--yarn-factor F] [--yarn-origin O]\n"
            "       [--device N] [--tp 1|2|4] [--pp 1|2] [--pipeline-chunks 1..8] [--devices N,...] [--storage-device N]\n"
            "       [--kv-dtype bf16|int8] [--spec mtp|dflash --draft-tokens N]\n"
-           "       [--ram-kv-window N] [--ram-kv-budget-bytes N]\n"
+           "       [--kvmem [--kvmem-budget B] [--kvmem-gen-reserve R] [--kvmem-host-mib H] ...]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -139,8 +140,7 @@ std::string usage_text(const char* argv0) {
            "--prefix-cache-tokens N: historical host KV budget, default 384000; 0 disables history.\n"
            "--volta-long-attention selects experimental complete-history SM70 TP2/TP4 INT8 attention (1..8 requests); floating-point output may differ.\n"
            "--volta-fast-decode selects experimental QUASAR TP2/TP4 Text NVFP4 FP32 epilogues and packed MTP W8; output may differ.\n"
-           "--ram-kv-window enables experimental approximate Q/K mean-vector RAM-KV retrieval (SM70, 27B Text/MTP, TP1/TP2/PP2).\n"
-           "It changes long-history attention. Default archive budget: 32000000000 bytes; not a process RSS cap.\n"
+           + product::kvmem_usage_text() +
            "--vision-max-tokens N bounds merged visual tokens per prompt (1..32768, default 32768),\n"
            "independently of text context; smaller budgets reduce reserved Vision memory.\n"
            "--kv-capacity auto leaves " +
@@ -186,6 +186,7 @@ Options parse_options(int argc, char** argv) {
     bool kv_capacity_explicit = false;
     bool device_explicit      = false;
     bool devices_explicit     = false;
+    product::KvMemCommandLine kvmem_cli;
 
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -217,10 +218,7 @@ Options parse_options(int argc, char** argv) {
             options.prefix_cache_tokens = parse_u32(value(arg), "prefix-cache-tokens", true);
         } else if (arg == "--volta-long-attention") {
             options.volta_long_attention = true;
-        } else if (arg == "--ram-kv-window") {
-            options.ram_kv.gpu_tokens = parse_u32(value(arg), "ram-kv-window");
-        } else if (arg == "--ram-kv-budget-bytes") {
-            options.ram_kv.budget_bytes = parse_u64(value(arg), "ram-kv-budget-bytes");
+        } else if (kvmem_cli.parse(std::string(arg), [&](const char* flag) { return value(flag); })) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
@@ -312,9 +310,10 @@ Options parse_options(int argc, char** argv) {
         }
     }
 
+    options.kvmem = kvmem_cli.resolve();
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(
-            options.ram_kv.gpu_tokens != 0 ? options.ram_kv.gpu_tokens : options.max_context);
+            options.kvmem.enabled() ? options.kvmem.window_tokens() : options.max_context);
     }
 
     if (devices_explicit) {
@@ -337,7 +336,7 @@ Options parse_options(int argc, char** argv) {
     if (options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
     }
-    if (options.ram_kv.gpu_tokens == 0 && options.kv_capacity.mode == KvCapacityMode::Explicit &&
+    if (!options.kvmem.enabled() && options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }

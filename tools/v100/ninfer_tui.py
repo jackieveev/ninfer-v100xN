@@ -115,9 +115,10 @@ class Settings:
     presence_penalty: str = ''
     frequency_penalty: str = ''
     seed: str = ''
-    ram_kv: bool = False
-    ram_window: int = 32768
-    ram_budget: int = 32000000000
+    kvmem: bool = False
+    kvmem_budget: int = 32768
+    kvmem_reserve: int = 2560
+    kvmem_host_mib: int = 16384
     log: str = str(ROOT / 'profiles/tui-server.jsonl')
 
     def apply_profile(self, name: str) -> None:
@@ -126,7 +127,7 @@ class Settings:
         self.tp, self.context, self.chunk = preset.tp, preset.context, preset.chunk
         self.pp, self.pipeline_chunks = 1, 8
         self.kv_capacity, self.kv_dtype = '', 'int8'
-        self.ram_kv, self.max_concurrency = False, 1
+        self.kvmem, self.max_concurrency = False, 1
         self.graphs = True
         for name in SAMPLING_LIMITS:
             setattr(self, name, '')
@@ -148,9 +149,10 @@ class Settings:
                 '--log-stats-interval-ms', '1000']
         if self.pp != 1:
             args += ['--pp', str(self.pp), '--pipeline-chunks', str(self.pipeline_chunks)]
-        if self.ram_kv:
-            args += ['--ram-kv-window', str(self.ram_window), '--kv-capacity', str(self.ram_window),
-                     '--ram-kv-budget-bytes', str(self.ram_budget)]
+        if self.kvmem:
+            args += ['--kvmem', '--kvmem-budget', str(self.kvmem_budget),
+                     '--kvmem-gen-reserve', str(self.kvmem_reserve),
+                     '--kvmem-host-mib', str(self.kvmem_host_mib)]
         elif self.kv_capacity.strip():
             args += ['--kv-capacity', self.kv_capacity.strip()]
         if self.api_key:
@@ -240,8 +242,8 @@ class Settings:
         if not 0 <= self.prefix_cache_tokens <= 100000000:
             raise ValueError('Historical prefix cache budget must be 0..100000000 tokens (host RAM)')
         if self.long_attention and (self.tp not in (2, 4) or self.backend == 'dflash' or
-                                    self.kv_dtype != 'int8' or self.ram_kv):
-            raise ValueError('Experimental long attention requires TP2/TP4 INT8 KV concurrency 1..8 Text/Vision None/MTP (Vision TP2 only), no RAM-KV')
+                                    self.kv_dtype != 'int8'):
+            raise ValueError('Experimental long attention requires TP2/TP4 INT8 KV concurrency 1..8 Text/Vision None/MTP (Vision TP2 only)')
         if self.fast_decode and (self.tp not in (2, 4) or self.backend == 'dflash' or self.vision):
             raise ValueError('Experimental fast decode requires QUASAR SM70 TP2/TP4 Text None/MTP')
         if self.vision and (self.tp != 2 or self.backend == 'dflash'):
@@ -255,16 +257,17 @@ class Settings:
         if self.kv_dtype not in ('int8', 'bf16') or not 1 <= self.max_concurrency <= 8:
             raise ValueError('KV dtype must be int8/bf16; concurrency must be 1..8')
         capacity = self.kv_capacity.strip()
-        if not self.ram_kv and capacity and capacity != 'auto' and (
+        if not self.kvmem and capacity and capacity != 'auto' and (
                 not capacity.isdecimal() or int(capacity) < self.context):
             raise ValueError('KV capacity must be auto, empty, or at least context capacity')
-        if self.ram_kv:
-            if self.vision or self.backend == 'dflash' or self.tp == 4 or self.max_concurrency != 1:
-                raise ValueError('RAM-KV requires TP1/TP2/PP2 concurrency 1 Text None/MTP')
-            minimum = self.chunk * (self.pipeline_chunks if self.pp == 2 else 1) + 8192
-            if (self.ram_window % 64 or not minimum <= self.ram_window <= self.context or
-                    not 0 < self.ram_budget <= 18446744073709551615):
-                raise ValueError(f'RAM-KV window must be a multiple of 64 in {minimum}..{self.context}; budget must be positive')
+        if self.kvmem:
+            if self.backend == 'dflash' or self.tp == 4 or self.pp != 1 or self.max_concurrency != 1:
+                raise ValueError('KVMem requires TP1/TP2, PP1, concurrency 1, Text/Vision None/MTP')
+            if (self.kvmem_budget < 128 or self.kvmem_budget % 64 or self.kvmem_reserve % 64 or
+                    self.kvmem_reserve < self.chunk or self.kvmem_host_mib <= 0 or
+                    self.kvmem_budget + self.kvmem_reserve > self.context):
+                raise ValueError('KVMem budget/reserve must be multiples of 64, reserve >= prefill '
+                                 'chunk and budget + reserve <= context; host MiB must be positive')
         for name in SAMPLING_LIMITS:
             validate_sampling(name, getattr(self, name))
         if local_path(self.artifact).name == 'qwen3_8_27b_fp8.ninfer' and self.tp != 4:
@@ -436,8 +439,9 @@ FIELDS = [
     ('vision_max_tokens', 'Visual token budget', None),
     ('fast_decode', 'Fast math (Text only)', (False, True)),
     ('long_attention', 'Long attention (Text/Vision)', (False, True)),
-    ('ram_kv', 'Experimental RAM-KV', (False, True)),
-    ('ram_window', 'RAM-KV GPU tokens', None), ('ram_budget', 'RAM archive bytes', None),
+    ('kvmem', 'KVMem long-context memory', (False, True)),
+    ('kvmem_budget', 'KVMem budget tokens', None), ('kvmem_reserve', 'KVMem gen reserve', None),
+    ('kvmem_host_mib', 'KVMem host archive MiB', None),
     ('graphs', 'CUDA Graphs', (False, True)), ('prefix_reuse', 'Prefix cache', (False, True)),
     ('prefix_cache_tokens', 'History RAM tokens (384K ~12.8 GiB + state; 0 off)', None),
     ('thinking', 'Default thinking', (False, True)), ('greedy', 'Force greedy', (False, True)),
@@ -571,11 +575,11 @@ class Launcher:
             'Prior 25 full-vocabulary probes: argmax 25/25, min cosine 0.998830814,',
             'max KL 0.001903103; only 9/25 pass the near-lossless bounds.',
             'Output and draft acceptance may change. IQ impact unknown; no current GPQA.',
-            'Vision keeps long attention enabled; fast math and RAM-KV remain Text-only.',
+            'Vision keeps long attention and KVMem enabled; fast math remains Text-only.',
             'Vision preset starts with experiments OFF: 98K context / 4096 visual tokens.',
             'PP2: TP1 on two devices; serial decode, no established speed gain.',
-            'RAM-KV: approximate retrieved history during prefill AND decode; quality can drop.',
-            'RAM-KV gains/quality unmeasured here. Archive bytes are NOT a process RSS limit.',
+            'KVMem: GPU KV window is budget+reserve; selected 64-token blocks are approximate.',
+            'KVMem host MiB bounds the packed archive, NOT process RSS.',
             'Details: docs/performance.md, docs/tp4.md and docs/v100-decode-survey.md',
         ]
         self.show_lines(screen, 'Experimental gains and output impact', lines)
@@ -745,7 +749,6 @@ class Launcher:
                             if field == 'vision' and self.settings.vision:
                                 self.settings.fast_decode = False
                                 self.settings.prefix_reuse = False
-                                self.settings.ram_kv = False
                             if field == 'backend' and self.settings.backend in ('none', 'dflash'):
                                 self.settings.optimized = False
                             self.profile = 'custom'

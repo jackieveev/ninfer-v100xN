@@ -245,7 +245,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     engine_options.prefill_chunk            = options_.prefill_chunk;
     engine_options.prefill_decode_rounds    = options_.prefill_decode_rounds;
     engine_options.kv_cache                 = options_.kv_cache;
-    engine_options.ram_kv                   = options_.ram_kv;
+    engine_options.kvmem                    = options_.kvmem;
     engine_options.prefix_cache_tokens      = options_.prefix_cache_tokens;
     engine_options.volta_long_attention     = options_.volta_long_attention;
     engine_options.volta_fast_decode     = options_.volta_fast_decode;

@@ -126,7 +126,7 @@ branches are evicted on budget overflow. For QUASAR INT8 KV with MTP, that budge
 about **12.8 GiB host RAM**, plus state and temporary ownership. The 33.4 GiB figure applies to
 1M tokens. Archived state has a separate
 2 GiB cap. Zero disables historical retention while keeping current resident reuse.
-Vision, DFlash and sparse RAM-KV do not use historical branches.
+Vision, DFlash and KVMem do not use historical branches.
 [Cache behavior and limits](docs/maintainer/paged-kv-cache.md#104-historical-branches).
 
 Responses accepts `reasoning: {"effort": "high"}` and maps it to the loaded Qwen template;
@@ -293,7 +293,7 @@ eight-card host. With `CUDA_VISIBLE_DEVICES=4,6`, use logical devices `0,1`.
 |---|---|
 | [TP4 / NVLink](docs/tp4.md) | four-card hosts, QUASAR/official NVFP4/native FP8 and matched TP2 controls |
 | [Other V100 measurements](docs/performance-v100.md) | official NVFP4, Q4_K_M, P2P/staging controls and prefix tests |
-| [RAM-KV / PP2 experiments](docs/experiments.md) | approximate retrieval and startup-fixed layer pipeline |
+| [KVMem / PP2 experiments](docs/experiments.md) | KVMem 512K/1M long-context retrieval and startup-fixed layer pipeline |
 | [Alternative models / Vision](docs/alternatives.md) | Q4_K_M conversion and QUASAR image/video support |
 | [V100 implementation](docs/v100-implementation.md) | kernel, transport and numerical verification details |
 | [Decode source survey](docs/v100-decode-survey.md) | inspected projects, adopted mechanisms and remaining candidates |
@@ -318,9 +318,8 @@ references its QPN kernels and [v100-skinny](https://github.com/dnv2003/v100-ski
 DFlash2 follows
 [Inco AI's implementation](https://inco.ai/blog/dflash2/) and its
 [Qwen3.8-27B draft checkpoint](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2).
-[KVMem](https://github.com/kvmem/kvmem-llama.cpp) informed the optional RAM-KV experiment.
-The native implementation adapts Q/K mean-vector retrieval to chronological paged KV; selective-history
-attention is approximate and explicitly opt-in. The default profile retains full-context attention.
+The optional `--kvmem` mode vendors the [KVMem](https://github.com/kvmem/kvmem) core as backend
+`ninfer-v100` over chronological paged KV; selective-history attention is approximate and explicitly opt-in. The default profile retains full-context attention.
 
 [Li3age](https://github.com/Li3age) contributed TP2 Vision and the configurable visual-token
 budget in [PR #1](https://github.com/tuxKOH/ninfer-V100X2/pull/1).

@@ -18,7 +18,7 @@ comparison, CUDA 12.8 build and API launch. Other hardware and experiments have 
 | [TP4 / NVLink](tp4.md) | separate four-V100 host, official NVFP4/native FP8, API and 1Cat controls |
 | [WSL2](wsl/README.md) | experimental V100 TP2 deployment, measured bottlenecks and 0.2.0 adaptation work |
 | [Other V100 measurements](performance-v100.md) | official NVFP4, Q4_K_M, transport and prefix-cache controls |
-| [RAM-KV / PP2 experiments](experiments.md) | approximate retrieval and layer-pipeline measurements |
+| [KVMem / PP2 experiments](experiments.md) | KVMem long-context retrieval and layer-pipeline measurements |
 | [Alternative models / Vision](alternatives.md) | Q4_K_M conversion and opt-in official-NVFP4 Vision |
 | [V100 implementation](v100-implementation.md) | kernel, transport and verification details |
 | [V100 decode research / 项目调研](v100-decode-survey.md) | public V100 projects, kernel sources, and prioritized candidates for further decode optimization |

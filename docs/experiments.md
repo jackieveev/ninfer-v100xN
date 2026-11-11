@@ -1,60 +1,38 @@
-# RAM-KV and PP2 experiments
+# KVMem and PP2 experiments
 
-These startup-fixed experimental routes are separate from the recommended complete-history TP2 configuration. RAM-KV is approximate attention; PP2 uses serial two-stage decode. See [CLI](cli.md) for options and [paged KV contracts](maintainer/paged-kv-cache.md#15-optional-native-ram-kv-experiment) for retrieval semantics.
+These startup-fixed experimental routes are separate from the recommended complete-history TP2 configuration. KVMem is approximate attention; PP2 uses serial two-stage decode. See [CLI](cli.md) for options and [paged KV contracts](maintainer/paged-kv-cache.md#15-optional-kvmem-experiment) for retrieval semantics.
 
-## Native RAM-KV: larger windows and short inputs
+## KVMem: 512K and 1M context
 
-Measured on the local two V100-SXM2-16GB cards, CUDA 12.8 / SM70, PCIe P2P without NVLink,
-using `qwen3.8-27b/nvfp4-full`, INT8 group-64 KV, optimized-head greedy MTP3 and a 1024-token
-prefill chunk. RAM-KV is approximate Q/K mean-vector retrieval, including during long prefill;
-the ordinary route retains the complete history.
+Measured on 2026-11-11 on the remote two V100-SXM2-16GB TP2 host, CUDA 12.8 / SM70, with the
+QUASAR-derived Coder390 v3 NVFP4 artifact, INT8 group-64 KV, YaRN (factor 4) at 1048576
+logical context, long attention, MTP and CUDA Graphs. KVMem budget 131072 + generation reserve
+2048 gives a 133120-token GPU window; the host archive limit is 37024 MiB. KVMem is approximate
+attention, including during long prefill.
 
-The matched long code fixture occupies 261556 input tokens at 262144 capacity and generates
-512 committed output tokens. Each row is one cold request. The output-window check counts
-literal credential strings, not complete code correctness; retrieval counts are selected
-fact pages at the measured frontier, not a general quality score.
+The probe is a synthetic code archive with three one-line secret-code notes at 10%, 50% and 90%
+depth, greedy sampling, 4096 output tokens. "Question separate" sends the archive and the question
+as two user turns, so the retrieval query is the question alone.
 
-| GPU history window | Prefill tok/s | Committed decode tok/s | Fact pages resident | Credential strings in output |
-|---|---:|---:|---:|---:|
-| Complete history | 759.95 | 55.33 | 15/15 | 6/6 |
-| 98304 (96K) | 903.29 | 80.71 | 13/15 | 5/6 |
-| 163840 (160K) | 745.46 | 63.25 | 14/15 | 5/6 |
-| 196608 (192K) | 742.62 | 55.79 | 15/15 | 6/6 |
+| Prompt tokens | Prompt shape | Prefill tok/s | TTFT s | Committed decode tok/s | MTP accept | Codes recalled |
+|---:|---|---:|---:|---:|---:|---:|
+| 98528 | question appended (window not exceeded) | 926.3 | 106.8 | 67.8 | 73.6% | 3/3 |
+| 197543 | question appended | 726.6 | 272.7 | 70.7 | 76.5% | 3/3 |
+| 487384 | question separate | 628.6 | 777.4 | 56.6 | 68.2% | 1/3 |
+| 990965 | question separate | 582.5 | 1705.5 | 55.6 | 68.2% | 1/3 |
 
-The 192K row raises the RAM archive ceiling to 64000000000 bytes. Its planned packed archive
-is only 9412018176 bytes; the whole-process cgroup remains capped at 32000000000 bytes,
-with swap disabled and a measured memory peak of 7079198720 bytes. Raising the archive ceiling
-does not increase retrieved history: `--ram-kv-window` controls that and consumes GPU memory
-and attention work. The 192K window improves these narrow recall checks, but loses almost
-all measured decode benefit over complete history. These results do not establish general
-quality equivalence.
-
-The short-input sweep fixes 180000 capacity, a 163840-token RAM-KV window, the same saved
-code input IDs for each paired row and 256 timed committed decode tokens plus one prefill
-output. Each route has one cold request per row; loading, graph priming and three-minute
-cooldowns are excluded.
-
-| Actual input tokens | Complete prefill tok/s | RAM-KV prefill tok/s | Complete decode tok/s | RAM-KV decode tok/s |
-|---:|---:|---:|---:|---:|
-| 512 | 1425.75 | 1367.38 | 130.70 | 123.24 |
-| 3072 | 1650.62 | 1589.31 | 134.03 | 125.60 |
-| 8192 | 1632.64 | 1572.99 | 125.42 | 117.37 |
-| 16384 | 1582.70 | 1523.91 | 132.87 | 124.84 |
-| 32768 | 1490.49 | 1426.89 | 120.74 | 113.71 |
-| 65536 | 1320.83 | 1270.56 | 99.68 | 93.61 |
-| 85000 | 1232.81 | 1183.35 | 99.61 | 93.75 |
-
-All seven pairs reproduce the same 257 output IDs and complete MTP counters, with zero
-RAM-KV transfer bytes. These inputs never fill the window, so no history is evicted;
-index/page-table maintenance still costs about 6% decode throughput. Use complete KV for
-these short inputs. This identity-window parity is not evidence for quality at a sparse
-long-context window. These saved sweeps precede the later paired gate/up optimization;
-their rates must not be substituted for that route's 85K results above.
-
-Local reports: `profiles/bench/kvmem-native-qk/256k-{full,w96k,w160k}-tp2/report.json`,
-`256k-w192k-ram64g-tp2/report.json`, and the `short-{full,w160k}-tp2/` reports in the same
-directory. See the [native RAM-KV contract](maintainer/paged-kv-cache.md#15-optional-native-ram-kv-experiment)
-for the approximate semantics and separate archive/process budgets.
+A repeated 487362-token request restores its turn checkpoint: TTFT 2.2–4.5 s and 70.8–79.5 tok/s
+decode. Peak server RSS at 1M is about 36.7 GB. GPU use is about 14.5 GB per card at any depth.
+With `--vision`, a 158432-token request with one image before 158K tokens of code exceeds the
+window and still answers the image's color correctly (TTFT 202.9 s); media pages stay resident.
+Missed codes are not a scoring or reload fault. In a 197554-token diagnosis with budget 32768,
+the three needle pages ranked first to third and were all resident at query replay. Archive
+reload was byte-exact, and the sparse attention routes pass the FP64 subset oracle. The model
+still reported only one code, and which one varied, whether that page was reloaded or never evicted. Keeping
+the 10% page resident throughout prefill (`--kvmem-sink-tokens 20480`) recovered it. Pressure
+prefill keeps only sink plus newest tail, as upstream KVMem does. Later context therefore
+never attends to an evicted needle, and recall falls as budget/context shrinks. These results
+describe this probe, not general long-context quality.
 
 ## Experimental PP2 layer pipeline
 
@@ -93,8 +71,7 @@ output IDs and MTP acceptance rates, so cross-layout results are descriptive, no
 strict same-output or quality-equivalence claims.
 
 PP2 supports one Text request, None/MTP and prefix reuse on SM70 Qwen3.8 NVFP4/QUASAR.
-Vision, DFlash, expert storage and concurrent requests are rejected. Optional Q/K RAM-KV is
-admitted. TP2 remains recommended for decode; PP2 cannot switch back to TP2 at the prefill boundary.
+KVMem, Vision, DFlash, expert storage and concurrent requests are rejected. TP2 remains recommended for decode; PP2 cannot switch back to TP2 at the prefill boundary.
 
 Reproduce the saved-input sweep with the selected Python 3.11 environment:
 

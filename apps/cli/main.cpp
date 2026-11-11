@@ -222,10 +222,12 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     print_metric("gpu weights used", format_arena_used(memory.weights));
     print_metric("gpu sequence used", format_arena_used(memory.sequence));
     print_metric("kv cache dtype", format_kv_cache(memory.kv_cache));
-    if (memory.ram_kv_gpu_tokens != 0) {
-        print_metric("RAM KV (approximate)", std::to_string(memory.ram_kv_gpu_tokens) + " GPU tokens");
-        print_metric("RAM KV archive limit", format_bytes(memory.ram_kv_archive_bytes));
-        print_metric("RAM KV transfers", format_bytes(memory.ram_kv_transfer_bytes));
+    if (memory.kvmem_window_tokens != 0) {
+        print_metric("KVMem budget/window", std::to_string(memory.kvmem_budget_tokens) + '/' +
+                                                std::to_string(memory.kvmem_window_tokens) + " tokens");
+        print_metric("KVMem archive limit", format_bytes(memory.kvmem_archive_bytes));
+        print_metric("KVMem transfers", format_bytes(memory.kvmem_transfer_bytes));
+        print_metric("KVMem selections", std::to_string(memory.kvmem_selections));
     }
     print_metric("kv cache payload", format_bytes(memory.kv_payload_bytes));
     print_metric("gpu workspace peak", format_arena_peak(memory.workspace));
@@ -311,7 +313,7 @@ int main(int argc, char** argv) {
         engine_options.kv_capacity    = cli.kv_capacity;
         engine_options.prefill_chunk  = cli.prefill_chunk;
         engine_options.kv_cache       = cli.kv_cache;
-        engine_options.ram_kv         = cli.ram_kv;
+        engine_options.kvmem          = cli.kvmem;
         engine_options.prefix_cache_tokens = cli.prefix_cache_tokens;
         engine_options.volta_long_attention = cli.volta_long_attention;
         engine_options.volta_fast_decode = cli.volta_fast_decode;

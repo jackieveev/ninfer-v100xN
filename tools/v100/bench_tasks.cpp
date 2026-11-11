@@ -109,7 +109,7 @@ int run(int argc, char** argv) {
     if (profile.at("tp") != "2" || profile.at("pp") != "1" ||
         profile.at("devices") != "0,1" || profile.at("spec") != "mtp" ||
         profile.at("draft_tokens") != 4 || profile.at("kv_dtype") != "int8" ||
-        profile.at("ram_kv") != false || profile.at("kv_capacity") != "" ||
+        profile.at("kvmem") != false || profile.at("kv_capacity") != "" ||
         profile.at("max_concurrency") != 1) {
         throw std::invalid_argument("matrix requires TP2 devices 0,1, MTP4, full INT8 KV "
                                     "following context capacity, and one active request");

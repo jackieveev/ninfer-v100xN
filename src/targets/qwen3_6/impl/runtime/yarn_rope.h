@@ -183,9 +183,6 @@ struct RopeDomain {
 // Throws std::invalid_argument with an actionable message when:
 //   - max_context is 0 or exceeds the effective ceiling;
 //   - yarn is requested on a variant whose rope domain does not carry a YaRN table;
-//   - yarn is requested together with Vision (the vision encoder ropes 2-D image-grid positions
-//     through an 18-entry D72/R72 table that the 32-entry text YaRN buffer does not describe;
-//     the Op wrapper rejects the override for that domain outright);
 //   - yarn is requested together with the DFlash speculative backend (D128/R128 double table);
 //   - yarn_origin != domain.native_max, or yarn_factor is not finite/positive, or
 //     yarn_origin * yarn_factor exceeds kMaximumYarnContext.

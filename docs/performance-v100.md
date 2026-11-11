@@ -749,8 +749,8 @@ do not relabel the retained staging attribution as a measurement of the current 
   blocks in host RAM and retrieves a query-selected subset into a bounded GPU window. That is an
   approximate attention policy, not a transparent full-180K KV spill: it changes which history
   participates in attention. The default V100X2 route keeps complete-context semantics. The
-  [optional native RAM-KV experiment](maintainer/paged-kv-cache.md#15-optional-native-ram-kv-experiment)
-  instead uses Q/K mean-vector retrieval adapted to NInfer's paged cache. It remains approximate.
+  [optional KVMem experiment](maintainer/paged-kv-cache.md#15-optional-kvmem-experiment)
+  instead uses the vendored KVMem core over NInfer's paged cache. It remains approximate.
 
 ## Historical pre-v3 DFlash2 route
 

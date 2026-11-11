@@ -974,6 +974,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
             processed.stats.media_preprocess_work_seconds;
         result.prepare.tokenize_seconds    = processed.stats.tokenize_seconds;
         result.identity.rewrite_checkpoint = processed.rewrite_checkpoint;
+        const auto count = std::min<std::size_t>(512, result.token_ids.size());
+        result.retrieval_query = {result.token_ids.size() - count, count};
     } else {
         const fi::RenderedChat rendered =
             impl_->chat_template.render(messages, render_options(options));

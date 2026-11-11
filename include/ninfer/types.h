@@ -92,11 +92,29 @@ struct LoadProgress {
     std::function<void(std::string_view phase, std::uint64_t done, std::uint64_t total)> callback;
 };
 
-// Experimental, approximate RAM-KV retrieval. Zero disables it. The window bounds GPU KV
-// residency; the archive retains the original packed KV bytes, not a second quantization.
-struct RamKvOptions {
-    std::uint32_t gpu_tokens = 0;
-    std::uint64_t budget_bytes = 32000000000ULL;
+enum class KvMemQueryScorer : std::uint8_t { PageSoftmax, MeanQCosine };
+enum class KvMemScoreAggregation : std::uint8_t { Mean, Max };
+
+// KVMem (github.com/kvmem/kvmem) block-sparse long-context memory. Zero budget disables it.
+// Budget B selects resident history, gen_reserve R holds unselected appends; the GPU KV window
+// is B+R. Original packed KV bytes spill to a host archive bounded by host_bytes; attention
+// over the selected 64-token blocks is approximate with respect to the complete history.
+struct KvMemOptions {
+    std::uint32_t budget_tokens      = 0;
+    std::uint32_t gen_reserve_tokens = 1024;
+    std::uint32_t sink_tokens        = 0;
+    std::uint32_t recent_tokens      = 64;
+    std::uint64_t host_bytes         = 16384ULL << 20;
+    KvMemQueryScorer query_scorer    = KvMemQueryScorer::PageSoftmax;
+    KvMemScoreAggregation score_aggregation = KvMemScoreAggregation::Mean;
+    bool lrfu                        = false;
+    double lrfu_lambda               = 0.5;
+    double lrfu_top_fraction         = 0.9;
+
+    [[nodiscard]] bool enabled() const noexcept { return budget_tokens != 0; }
+    [[nodiscard]] std::uint32_t window_tokens() const noexcept {
+        return budget_tokens + gen_reserve_tokens;
+    }
 };
 
 struct EngineOptions {
@@ -145,7 +163,7 @@ struct EngineOptions {
     // QUASAR SM70 TP2/TP4 Text/None/MTP: packed NVFP4 FP32 epilogues and MTP W8 reductions.
     // Changes arithmetic; independent of the optional complete-history attention profile.
     bool volta_fast_decode             = false;
-    RamKvOptions ram_kv;
+    KvMemOptions kvmem;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
@@ -519,9 +537,11 @@ struct MemorySummary {
     // all active ranks' nodes and the collectives' cross-device copies; event edges are not nodes.
     std::size_t cuda_graph_node_count             = 0;
     std::size_t kv_payload_bytes                  = 0;
-    std::uint32_t ram_kv_gpu_tokens = 0;
-    std::uint64_t ram_kv_archive_bytes = 0; // Maximum packed archive, summed across ranks.
-    std::uint64_t ram_kv_transfer_bytes = 0; // Actual H2D+D2H payload, summed across ranks.
+    std::uint32_t kvmem_budget_tokens = 0;
+    std::uint32_t kvmem_window_tokens = 0;
+    std::uint64_t kvmem_archive_bytes = 0; // Maximum packed archive, summed across ranks.
+    std::uint64_t kvmem_transfer_bytes = 0; // Actual H2D+D2H payload, summed across ranks.
+    std::uint64_t kvmem_selections = 0;     // Query and pressure working-set selections.
     // GDN (linear-attention) recurrent + convolution state for THIS device, head-sharded by tp.
     std::size_t gdn_state_bytes = 0;
 };

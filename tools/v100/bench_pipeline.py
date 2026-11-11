@@ -29,7 +29,6 @@ def main():
                         default=[512, 3072, 8192, 16384, 32768, 65536, 85000])
     parser.add_argument("--drafts", nargs="+", type=int, choices=(0, 3), default=[0, 3])
     parser.add_argument("--capacity", type=int, default=180000)
-    parser.add_argument("--window", type=int, default=0)
     parser.add_argument("--prefill-chunk", type=int, default=1024)
     parser.add_argument("--output-tokens", type=int, default=256)
     parser.add_argument("--repetitions", type=int, default=2)
@@ -65,8 +64,6 @@ def main():
                 if not corpus.is_file():
                     raise FileNotFoundError(corpus)
                 name = f"{backend}-c{args.capacity}-p{tokens}-k{args.prefill_chunk}-mtp{drafts}"
-                if args.window:
-                    name += f"-ram{args.window}"
                 raw = args.output_dir / f"{name}.json"
                 parallel = ["--tp", "2"] if backend == "tp2" else [
                     "--pp", "2", "--pipeline-chunks", "1" if backend == "pp2-serial" else "8"]
@@ -78,8 +75,6 @@ def main():
                            "--corpus", str(corpus.resolve()), "-pg", f"{tokens},{args.output_tokens}",
                            "--warmup", "0", "-r", str(args.repetitions), "--capture-generation",
                            "-o", "json", "--output-file", str(raw.resolve())]
-                if args.window:
-                    command += ["--ram-kv-window", str(args.window)]
                 command_path = raw.with_suffix(".command.json")
                 if raw.exists():
                     if json.loads(command_path.read_text()) != command:
@@ -111,7 +106,7 @@ def main():
                     case_estimate = max(case_estimate, time.monotonic() - started)
                     report = json.loads(raw.read_text())
                 row = summarize(report)
-                row.update(backend=backend, drafts=drafts, chunk=args.prefill_chunk, window=args.window,
+                row.update(backend=backend, drafts=drafts, chunk=args.prefill_chunk,
                            raw_report=raw.name, devices=report["environment"]["devices"],
                            device_memory=report["memory"]["devices"],
                            phase_seconds={phase: statistics.mean(
@@ -137,7 +132,7 @@ def main():
             equivalence.append({"prompt_tokens": tokens, "drafts": drafts,
                                 "wave_serial_output_and_speculation_equal": equal})
     durable_json(args.output_dir / "equivalence.json", equivalence)
-    if not args.window and any(not row["wave_serial_output_and_speculation_equal"] for row in equivalence):
+    if any(not row["wave_serial_output_and_speculation_equal"] for row in equivalence):
         raise RuntimeError("PP wave/serial state replay differs; inspect saved reports")
 
 

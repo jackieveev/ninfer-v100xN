@@ -48,7 +48,7 @@
   may change. The ~198.1 tok/s result combines this switch with long attention.
 - **Optional long attention:** `--volta-long-attention` keeps complete INT8 KV history but
   retunes long TP2 partitions, online softmax and FP32 PV accumulation. It supports experimental 1–8-request
-  Text/None/MTP on SM70, excludes DFlash/RAM-KV/Vision, and can change generated output.
+  Text/None/MTP on SM70, excludes DFlash, admits KVMem and TP2 Vision, and can change generated output.
   Five-query verification uses four eight-row QK warps with distributed Q fragments and inline
   32-key softmax, followed by eight dimension warps accumulating PV in FP32. The Q staging tile
   is reused for K/V after its fragments become resident in registers. This changes the former
@@ -77,7 +77,7 @@
 - **Experimental PP2:** SM70 Qwen3.8 NVFP4/QUASAR can use `--tp 1 --pp 2 --devices 0,1`.
   Complete layers are split 32/32; chronological prefill chunks run on two stages, while
   decode visits both stages serially. Text/None/MTP and prefix reuse are supported for one
-  request; optional sparse RAM-KV is supported, but Vision and DFlash are not. TP2 remains the default recommended route.
+  request; KVMem, Vision and DFlash are not. TP2 remains the default recommended route.
   See [the matched pipeline evaluation](experiments.md#experimental-pp2-layer-pipeline).
 - **Volta TP2 residuals:** Q5 row shards now select executable SM70 SIMT, fused MMA, or CUTLASS
   routes with the actual peak workspace reserved. BF16 row shards use the SM70 CUTLASS route.

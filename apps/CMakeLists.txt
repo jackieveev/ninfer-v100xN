@@ -8,6 +8,7 @@ target_include_directories(ninfer PRIVATE
 target_link_libraries(ninfer PRIVATE
   ninfer_engine
   ninfer_product_load_progress
+  ninfer_product_kvmem_options
   ninfer_product_prompt_input)
 
 add_executable(ninfer-serve serve/main.cpp)
@@ -16,4 +17,5 @@ target_include_directories(ninfer-serve PRIVATE
   ${PROJECT_SOURCE_DIR}/src
   ${PROJECT_SOURCE_DIR}/third_party
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
-target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_load_progress)
+target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_kvmem_options
+  ninfer_product_load_progress)

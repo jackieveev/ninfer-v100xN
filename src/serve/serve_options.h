@@ -20,6 +20,7 @@ inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 
 struct ServeOptions {
     bool help_requested = false;
+    bool kvmem_capabilities_requested = false;
     std::string artifact_path;
     std::string host = "127.0.0.1";
     int port         = 8080;
@@ -54,7 +55,7 @@ struct ServeOptions {
     // --devices, or synthesized as {device} when --devices is omitted).
     std::vector<int> devices;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
-    RamKvOptions ram_kv;
+    KvMemOptions kvmem;
     std::uint32_t prefix_cache_tokens = 384000;
     bool volta_long_attention = false;
     bool volta_fast_decode = false;

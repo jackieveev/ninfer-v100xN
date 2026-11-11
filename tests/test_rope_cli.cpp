@@ -11,8 +11,7 @@
 //      against, so getting it wrong is either a silent cap at 262144 or an out-of-domain plan.
 //   3. The complete accept/reject matrix that function owns. Each rejection exists because the
 //      alternative is a wrong answer rather than an error: a mismatched origin would build a
-//      correction table for the wrong window, `--vision` would rope 2-D image-grid positions
-//      through a table that does not describe them, and an over-large factor would ask for
+//      correction table for the wrong window, and an over-large factor would ask for
 //      positions past the product's 1,048,576 ceiling.
 //
 // The domain values are the two registered rope domains: qwen3.6/3.8-27B (native 262144, YaRN
@@ -249,13 +248,14 @@ void check_accept_reject_matrix() {
           }, "--rope yarn is not available"),
           "yarn was accepted on a variant with no YaRN rope domain");
 
-    // Rejected: yarn with Vision, at any tp width.
-    check(rejected([] {
+    // Accepted: yarn with Vision. Only the text MRoPE takes the YaRN table; the Vision tower
+    // keeps its own native 2-D rotary.
+    check(!rejected([] {
               EngineOptions options = options_for(RopeMode::Yarn, 4096, 4.0, 262144);
               options.enable_vision = true;
               (void)rope_effective_max_context(options, kQwen27b);
-          }, "cannot be combined with --vision"),
-          "yarn + vision was accepted");
+          }),
+          "yarn + vision was rejected");
 
     // Rejected: yarn with the DFlash speculative backend; accepted with MTP.
     check(rejected([] {

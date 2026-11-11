@@ -97,7 +97,7 @@ struct PreparedPromptData {
     std::vector<TokenId> token_ids;
     std::vector<std::uint8_t> token_types;
     std::vector<std::int32_t> positions;
-    // Last bounded user query in the serialized token stream; absent for media.
+    // Last bounded user query in the serialized token stream; the prompt tail for media.
     TokenSpan retrieval_query;
     std::int32_t rope_delta = 0;
     // One immutable payload per Vision item, in the same order as vision_items.

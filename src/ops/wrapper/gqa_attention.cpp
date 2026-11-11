@@ -597,7 +597,8 @@ void gqa_attention(const Tensor& q, const Tensor& k, const Tensor& v, const Tens
         cache.read_tables = Tensor{};
         const auto maximum = std::min(envelope.max_visible_keys, cache.read_capacity);
         const GqaExecutionEnvelope bounded{
-            envelope.min_visible_keys == envelope.max_visible_keys ? maximum : 1U, maximum};
+            envelope.min_visible_keys == envelope.max_visible_keys ? maximum : 1U, maximum,
+            envelope.volta_long_attention};
         gqa_attention(q, k, v, compact, valid_columns, kv_table_rows, scale, cache, bounded,
                       workspace, out, stream);
         return;
@@ -696,7 +697,8 @@ void gqa_attention_cached(const Tensor& q, const Tensor& positions, float scale,
         resident.read_indices = Tensor{};
         resident.read_table = Tensor{};
         const auto maximum = std::min(envelope.max_visible_keys, cache.read_capacity);
-        gqa_attention_cached(q, compact, scale, resident, {1U, maximum}, workspace, out, stream);
+        gqa_attention_cached(q, compact, scale, resident,
+                             {1U, maximum, envelope.volta_long_attention}, workspace, out, stream);
         return;
     }
 

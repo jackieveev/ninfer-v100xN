@@ -269,7 +269,7 @@ class GuiCacheDisplay(unittest.TestCase):
                  vision_max_tokens=4096, temperature='0.2', kv_capacity='auto'),
             dict(initial, volta_fast_decode=True, volta_long_attention=True,
                  greedy=True, prefix_reuse=False, temperature='0.4'),
-            dict(initial, ram_kv=True, kv_capacity='300000'),
+            dict(initial, kvmem=True, kvmem_budget=65536, kv_capacity='300000'),
         )
         for values in variants:
             with self.subTest(values=values):
@@ -403,26 +403,33 @@ class GuiCacheDisplay(unittest.TestCase):
         self.gui._refresh_memory_estimate()
         self.assertIn('不可用', self.gui.memory_note.text())
 
-    def test_pipeline_ram_kv_and_exact_integer_sampling(self):
+    def test_pipeline_kvmem_and_exact_integer_sampling(self):
         self.gui.tp.setCurrentText('1')
         self.gui.pp.setCurrentText('2')
-        self.gui.ram_kv.setChecked(True)
-        self.gui.ram_window.setValue(32768)
         self.gui.seed.setText('18446744073709551615')
         self.assertIsNone(self.gui._validate())
         command = self.gui._command()
-        for option, value in (('--pp', '2'), ('--pipeline-chunks', '8'),
-                              ('--kv-capacity', '32768'), ('--ram-kv-window', '32768'),
-                              ('--ram-kv-budget-bytes', '32000000000')):
+        for option, value in (('--pp', '2'), ('--pipeline-chunks', '8')):
             self.assertEqual(command[command.index(option) + 1], value)
         self.gui.seed.setText('18446744073709551616')
         self.assertIn('seed', self.gui._validate())
         self.gui.seed.clear()
-        self.gui.ram_window.setValue(8192)
-        self.assertIn('RAM-KV', self.gui._validate())
-        self.gui.ram_window.setValue(32768)
+        self.gui.kvmem.setChecked(True)
+        self.assertIn('KVMem', self.gui._validate())
+        self.gui.pp.setCurrentText('1')
+        self.gui.tp.setCurrentText('2')
+        self.gui.devices.setText('0,1')
+        self.gui.kvmem_reserve.setValue(self.gui.prefill_chunk.value())
+        self.assertIsNone(self.gui._validate())
+        command = self.gui._command()
+        self.assertIn('--kvmem', command)
+        self.assertNotIn('--kv-capacity', command)
+        self.assertEqual(command[command.index('--kvmem-budget') + 1], '32768')
+        self.gui.kvmem_reserve.setValue(64)
+        self.assertIn('KVMem', self.gui._validate())
         self.gui.vision.setChecked(True)
-        self.assertIn('PP2', self.gui._validate())
+        self.gui.kvmem_reserve.setValue(self.gui.prefill_chunk.value())
+        self.assertIsNone(self.gui._validate())
 
     def test_kv_capacity_tracks_context_and_accepts_each_supported_mode(self):
         self.gui.max_context.setValue(262144)

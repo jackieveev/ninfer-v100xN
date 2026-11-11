@@ -135,7 +135,8 @@ int test_cli_contract() {
                                     "--devices", "1,0", "--pipeline-chunks", "4"});
     failures += expect(pp2.tp == 1 && pp2.pp == 2 && pp2.pipeline_chunks == 4 &&
                            pp2.devices == std::vector<int>({1, 0}), "PP2 benchmark geometry");
-    const auto ram = parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--ram-kv-window", "98304"});
+    const auto memory = parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kvmem",
+                                        "--kvmem-budget", "65536"});
     failures += expect(parse_for_test({"ninfer_bench", "--weights", "model.ninfer",
                                        "--volta-long-attention"}).volta_long_attention &&
                            !parsed.volta_long_attention,
@@ -144,8 +145,8 @@ int test_cli_contract() {
                                        "--volta-fast-decode"}).volta_fast_decode &&
                            !parsed.volta_fast_decode,
                        "benchmark fast numeric profile must be explicit and disabled by default");
-    failures += expect(ram.ram_kv.gpu_tokens == 98304 && parsed.ram_kv.gpu_tokens == 0,
-                       "RAM KV benchmark window is explicit and off by default");
+    failures += expect(memory.kvmem.budget_tokens == 65536 && !parsed.kvmem.enabled(),
+                       "KVMem benchmark budget is explicit and off by default");
     failures += expect(tp2.tp == 2 && tp2.device == 1 && tp2.devices == std::vector<int>({1, 0}),
                        "TP2 preserves rank order and primary device");
     const auto tp4 = parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--tp", "4",
