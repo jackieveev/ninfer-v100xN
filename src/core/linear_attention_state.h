@@ -65,8 +65,8 @@ struct LinearAttentionStatePool {
     void copy_slot(std::int32_t src, std::int32_t dst, cudaStream_t stream = nullptr);
     void zero_slot(std::int32_t slot, cudaStream_t stream = nullptr);
     [[nodiscard]] std::size_t slot_bytes() const;
-    // Exact host images; both methods finish their stream before returning so the
-    // caller owns a stable image without pinning or adding device storage.
+    // Exact host images, ordered on `stream` only: page-locked image bytes must stay
+    // untouched by the host until the stream has passed these copies.
     void export_slot(std::int32_t slot, std::span<std::byte> image, cudaStream_t stream);
     void import_slot(std::int32_t slot, std::span<const std::byte> image, cudaStream_t stream);
 };

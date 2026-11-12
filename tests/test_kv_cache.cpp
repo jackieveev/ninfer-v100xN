@@ -146,6 +146,7 @@ int check_host_snapshot(ninfer::PagedKVPlaneOrder order, cudaStream_t stream) {
     }
     std::vector<std::byte> image(source.snapshot_bytes(4));
     source.export_pages(1, 4, image, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     std::size_t image_offset = 0;
     for (std::size_t p = 0; p < pool.plane_count(); ++p) {
         const auto& plane = pool.plane(p);

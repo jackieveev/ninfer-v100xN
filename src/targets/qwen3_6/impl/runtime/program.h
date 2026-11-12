@@ -4,6 +4,7 @@
 
 #include "core/arena.h"
 #include "core/gdn_replay_records.h"
+#include "core/pinned_host_pool.h"
 #include "ninfer/ops/allreduce.h"
 #include "ninfer/ops/sampling.h"
 #include "core/decode_graph.h"
@@ -149,14 +150,29 @@ struct SequenceKVBundle {
     std::array<std::optional<PagedKVAllocation>, kMaximumExecutionDevices - 1> backend_peers;
 };
 
+struct PrefixKVImage {
+    std::shared_ptr<std::byte[]> data;
+    std::size_t bytes = 0;
+    [[nodiscard]] std::span<std::byte> span() const noexcept { return {data.get(), bytes}; }
+};
+
 // Immutable host chunks form a persistent prefix tree. Descendants share only complete
 // chunks restored from this exact lineage; numerically recomputed prefixes never alias.
 struct PrefixKVChunk {
     std::uint32_t first_page = 0;
     std::uint32_t backend_pages = 0;
     std::uint32_t pages = 0;
-    std::array<std::vector<std::byte>, kMaximumExecutionDevices> text;
-    std::array<std::vector<std::byte>, kMaximumExecutionDevices> backend;
+    std::array<PrefixKVImage, kMaximumExecutionDevices> text;
+    std::array<PrefixKVImage, kMaximumExecutionDevices> backend;
+};
+
+// Archive and checkpoint transfers stay on each rank's compute stream, so released blocks
+// are reissued only behind their pending copies. KV pools are per rank; checkpoint images
+// place each rank's state at a fixed offset.
+struct PrefixHostPools {
+    std::optional<PinnedHostPool> checkpoint;
+    std::array<std::optional<PinnedHostPool>, kMaximumExecutionDevices> text;
+    std::array<std::optional<PinnedHostPool>, kMaximumExecutionDevices> backend;
 };
 
 struct ArchivedPrefix {
@@ -425,6 +441,8 @@ public:
     std::array<SequenceState, kMaximumConcurrency> sequences;
     std::array<RequestControl, kMaximumConcurrency> requests;
     std::vector<std::shared_ptr<ArchivedPrefix>> prefix_history;
+    PrefixHostPools prefix_host_pools;
+    void reserve_prefix_host_pools(const SequenceState& sequence, std::uint32_t frontier);
     void archive_prefix(SequenceState& sequence);
     void restore_archived_prefix(SequenceState& sequence, const ArchivedPrefix& archive,
                                  const RequestPlanImpl& plan);

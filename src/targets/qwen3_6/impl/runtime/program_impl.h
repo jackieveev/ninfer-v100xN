@@ -1215,6 +1215,7 @@ void ProgramImplCore::save_prefix_checkpoint(SequenceState& sequence, std::uint3
     const std::size_t bytes = prefix_checkpoint_bytes();
     const std::size_t limit = kPrefixCheckpointBudget / max_concurrency / bytes;
     if (limit == 0) { return; }
+    reserve_prefix_host_pools(sequence, frontier);
     auto& checkpoints = sequence.prefix_checkpoints;
     if (!checkpoints.empty() && checkpoints.back().frontier == frontier) { return; }
     PrefixCheckpoint checkpoint;
@@ -1248,7 +1249,9 @@ PrefixCheckpoint ProgramImplCore::capture_prefix_checkpoint(SequenceState& seque
     const std::size_t bytes = prefix_checkpoint_bytes();
     PrefixCheckpoint checkpoint{frontier, std::move(image)};
     if (!checkpoint.image || checkpoint.image.use_count() != 1) {
-        checkpoint.image = std::shared_ptr<std::byte[]>(new std::byte[bytes]);
+        checkpoint.image = prefix_host_pools.checkpoint
+                               ? prefix_host_pools.checkpoint->acquire(bytes)
+                               : std::shared_ptr<std::byte[]>(new std::byte[bytes]);
     }
     std::size_t offset = 0;
     const auto capture = [&](LinearAttentionStatePool& pool, DeviceContext& ctx) {
@@ -1262,7 +1265,6 @@ PrefixCheckpoint ProgramImplCore::capture_prefix_checkpoint(SequenceState& seque
     for (auto& peer : peers) { capture(peer->decoder->linear_attention, peer->device); }
     CUDA_CHECK(cudaMemcpyAsync(checkpoint.image.get() + offset, hidden.data, hidden.bytes(),
                                cudaMemcpyDeviceToHost, device.stream));
-    device.synchronize();
     return checkpoint;
 }
 
@@ -1288,7 +1290,6 @@ void ProgramImplCore::restore_prefix_checkpoint(SequenceState& sequence, std::ui
     for (auto& peer : peers) { restore(peer->decoder->linear_attention, peer->device); }
     CUDA_CHECK(cudaMemcpyAsync(sequence.tail_hidden.data, found->image.get() + offset,
                                sequence.tail_hidden.bytes(), cudaMemcpyHostToDevice, device.stream));
-    device.synchronize();
     sequence.tail_hidden_valid = true;
     sequence.deferred_prefix_state = restore_linear_state ? std::nullopt
                                                           : std::optional(frontier);
@@ -1298,6 +1299,42 @@ namespace {
 std::uint32_t prefix_page_count(std::uint32_t tokens) noexcept {
     return tokens == 0 ? 0 : 1 + (tokens - 1) / kPagedKVPageSize;
 }
+constexpr std::uint32_t kPrefixChunkPages = 64; // 4096 tokens, bounded tail recopy at a fork.
+std::size_t prefix_chunk_count(std::uint32_t tokens) noexcept {
+    return (prefix_page_count(tokens) + kPrefixChunkPages - 1) / kPrefixChunkPages;
+}
+}
+
+void ProgramImplCore::reserve_prefix_host_pools(const SequenceState& sequence, std::uint32_t frontier) {
+    const std::size_t state_bytes = prefix_checkpoint_bytes();
+    const std::size_t lane_images = kPrefixCheckpointBudget / max_concurrency / state_bytes;
+    if (lane_images == 0 || !sequence.kv) { return; }
+    auto& pools = prefix_host_pools;
+    // Images are captured one at a time; KV chunks for a whole frontier are archived at once,
+    // so their page-locked blocks are prepared while that frontier is still being computed.
+    // Page locking contends with the request's own CUDA calls, so the spare covers only
+    // chunks the next archive cannot inherit.
+    if (!pools.checkpoint) { pools.checkpoint.emplace(state_bytes); }
+    const std::size_t archived_images = prefix_cache_tokens == 0 ? 0 : kPrefixCheckpointBudget / state_bytes;
+    pools.checkpoint->reserve(2, max_concurrency * (lane_images + 1) + archived_images);
+    if (prefix_cache_tokens == 0 || ram_kv.gpu_tokens != 0) { return; }
+    const std::size_t chunk_limit = prefix_chunk_count(prefix_cache_tokens) + max_concurrency;
+    const std::size_t inherited =
+        std::min<std::size_t>(sequence.shared_prefix_tokens, frontier) / (kPrefixChunkPages * kPagedKVPageSize);
+    const std::size_t chunk_spare = prefix_chunk_count(frontier) - inherited + 1;
+    const auto reserve = [&](std::optional<PinnedHostPool>& pool, const PagedKVAllocation& allocation) {
+        if (!pool) { pool.emplace(allocation.snapshot_bytes(kPrefixChunkPages)); }
+        pool->reserve(chunk_spare, chunk_limit);
+    };
+    reserve(pools.text[0], sequence.kv->text);
+    if (sequence.kv->backend) { reserve(pools.backend[0], *sequence.kv->backend); }
+    for (const auto& peer : peers) {
+        const auto index = static_cast<std::size_t>(peer->rank - 1);
+        reserve(pools.text[peer->rank], *sequence.kv->text_peers[index]);
+        if (sequence.kv->backend_peers[index]) {
+            reserve(pools.backend[peer->rank], *sequence.kv->backend_peers[index]);
+        }
+    }
 }
 
 void ProgramImplCore::trim_prefix_history() {
@@ -1351,6 +1388,7 @@ void ProgramImplCore::archive_prefix(SequenceState& sequence) {
     if (prefix_cache_tokens == 0 || !sequence.retained || !sequence.history_enabled ||
         !sequence.kv || frontier == 0 || sequence.text_kv_valid < frontier ||
         std::uint64_t(pages) * kPagedKVPageSize > prefix_cache_tokens) { return; }
+    reserve_prefix_host_pools(sequence, frontier);
     // Archive capture must not recycle the lane's checkpoints: an admission plan
     // can already name one of them, even when the lane has room for only one image.
     std::vector<PrefixCheckpoint> saved_checkpoints;
@@ -1375,10 +1413,9 @@ void ProgramImplCore::archive_prefix(SequenceState& sequence) {
     archive->checkpoints = std::move(saved_checkpoints);
     std::sort(archive->checkpoints.begin(), archive->checkpoints.end(),
               [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
-    constexpr std::uint32_t chunk_pages = 64; // 4096 tokens, bounded tail recopy at a fork.
     const auto backend_pages = prefix_page_count(archive->mtp_valid);
-    for (std::uint32_t first = 0; first < pages; first += chunk_pages) {
-        const std::uint32_t count = std::min(chunk_pages, pages - first);
+    for (std::uint32_t first = 0; first < pages; first += kPrefixChunkPages) {
+        const std::uint32_t count = std::min(kPrefixChunkPages, pages - first);
         const auto inherited = std::find_if(sequence.prefix_chunks.begin(), sequence.prefix_chunks.end(),
             [&](const auto& chunk) {
                 return chunk->first_page == first && chunk->pages == count &&
@@ -1392,15 +1429,21 @@ void ProgramImplCore::archive_prefix(SequenceState& sequence) {
         chunk->first_page = first;
         chunk->pages = count;
         chunk->backend_pages = first < backend_pages ? std::min(count, backend_pages - first) : 0;
+        const auto image = [](std::optional<PinnedHostPool>& pool, std::size_t bytes) {
+            return PrefixKVImage{pool ? pool->acquire(bytes) : std::shared_ptr<std::byte[]>(new std::byte[bytes]),
+                                 bytes};
+        };
         const auto capture = [&](const PagedKVAllocation& text,
                                   const std::optional<PagedKVAllocation>& backend,
                                   DeviceContext& ctx, int rank) {
             const ScopedDevice scope(ctx.device);
-            chunk->text[rank].resize(text.snapshot_bytes(count));
-            text.export_pages(first, count, chunk->text[rank], ctx.stream);
+            chunk->text[rank] = image(prefix_host_pools.text[rank], text.snapshot_bytes(count));
+            text.export_pages(first, count, chunk->text[rank].span(), ctx.stream);
             if (backend && chunk->backend_pages != 0) {
-                chunk->backend[rank].resize(backend->snapshot_bytes(chunk->backend_pages));
-                backend->export_pages(first, chunk->backend_pages, chunk->backend[rank], ctx.stream);
+                chunk->backend[rank] = image(prefix_host_pools.backend[rank],
+                                             backend->snapshot_bytes(chunk->backend_pages));
+                backend->export_pages(first, chunk->backend_pages, chunk->backend[rank].span(),
+                                      ctx.stream);
             }
         };
         capture(sequence.kv->text, sequence.kv->backend, device, 0);
@@ -1437,11 +1480,12 @@ void ProgramImplCore::restore_archived_prefix(SequenceState& sequence, const Arc
                                   DeviceContext& ctx, int rank) {
             const ScopedDevice scope(ctx.device);
             const auto count = std::min(chunk->pages, pages - chunk->first_page);
-            text.import_page_prefix(chunk->first_page, count, chunk->pages, chunk->text[rank], ctx.stream);
+            text.import_page_prefix(chunk->first_page, count, chunk->pages, chunk->text[rank].span(),
+                                    ctx.stream);
             if (backend && chunk->first_page < mtp_pages) {
                 const auto bcount = std::min(chunk->backend_pages, mtp_pages - chunk->first_page);
                 backend->import_page_prefix(chunk->first_page, bcount, chunk->backend_pages,
-                                             chunk->backend[rank], ctx.stream);
+                                             chunk->backend[rank].span(), ctx.stream);
             }
         };
         restore(sequence.kv->text, sequence.kv->backend, device, 0);

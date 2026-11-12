@@ -162,7 +162,6 @@ void LinearAttentionStatePool::export_slot(std::int32_t slot, std::span<std::byt
             offset += source.bytes();
         }
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 void LinearAttentionStatePool::import_slot(std::int32_t slot, std::span<const std::byte> image,
@@ -176,7 +175,6 @@ void LinearAttentionStatePool::import_slot(std::int32_t slot, std::span<const st
             offset += destination.bytes();
         }
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 std::int32_t LinearAttentionStatePool::slot_count() const noexcept { return spec.slot_count; }

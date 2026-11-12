@@ -720,7 +720,6 @@ void transfer_kv_pages(const PagedKVPool& pool, std::span<const std::int32_t> id
         }
         offset += page_bytes * image_pages;
     }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 }
 void PagedKVAllocation::export_pages(std::uint32_t first, std::uint32_t count,

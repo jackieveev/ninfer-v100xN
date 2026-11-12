@@ -188,6 +188,7 @@ public:
     [[nodiscard]] Tensor block_table() const;
 
     [[nodiscard]] std::size_t snapshot_bytes(std::uint32_t pages) const;
+    // Host image transfers are ordered on `stream` only, like LinearAttentionStatePool's.
     void export_pages(std::uint32_t first, std::uint32_t count, std::span<std::byte> image,
                       cudaStream_t stream) const;
     void import_pages(std::uint32_t first, std::uint32_t count, std::span<const std::byte> image,

@@ -196,6 +196,7 @@ int main() {
     failures += expect_device_byte(slotted.recurrent_slot(1, 2), 0x2d, "restore kept slot2");
     std::vector<std::byte> roundtrip(image.size());
     slotted.export_slot(1, roundtrip, ctx.stream);
+    ctx.synchronize();
     if (image != roundtrip) { failures += fail("host state image did not round-trip exactly"); }
 
     auto fp32_conv_plan = plan_state(1, 7, 2, 2, 3, 4, 2, ninfer::DType::FP32);
