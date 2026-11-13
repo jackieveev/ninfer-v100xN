@@ -11,7 +11,8 @@ int main() {
     using namespace ninfer::test::linear_swiglu;
 
     try {
-        constexpr std::array<std::int32_t, 6> kA16Cases{1, 2, 32, 33, 34, 3072};
+        // 5 and 8 are the MTP4 and full-window verify widths.
+        constexpr std::array<std::int32_t, 8> kA16Cases{1, 2, 5, 8, 32, 33, 34, 3072};
         constexpr std::array<std::int32_t, 6> kA8Cases{1, 2, 3, 48, 65, 1024};
         int failures = 0;
         bool skipped = false;
@@ -28,7 +29,7 @@ int main() {
                 failures += result;
             }
         }
-        constexpr std::array<std::int32_t, 4> kShardCases{32, 33, 34, 3072};
+        constexpr std::array<std::int32_t, 6> kShardCases{5, 8, 32, 33, 34, 3072};
         const int shard_result = run_column_parallel_profile(
             "LinearSwiGLU FP8_A16 TP2",
             {QType::FP8_E4M3FN_ROW_BF16S, 17408, 5120, 8704, 1817U,

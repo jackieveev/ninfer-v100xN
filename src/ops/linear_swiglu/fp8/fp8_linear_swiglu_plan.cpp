@@ -6,6 +6,7 @@
 #include "ops/linear/fp8/fp8_config.h"
 #ifdef NINFER_VOLTA_BUILD
 #include "ops/linear/fp8/fp8_cutlass_sm70.h"
+#include "ops/linear/fp8/fp8_launch.h"
 #include "ops/linear_swiglu/swiglu_fp32.h"
 #endif
 
@@ -62,6 +63,17 @@ std::size_t qpn_split_workspace_bytes(std::int32_t tokens) {
 // does. Same threshold Q4's sibling route uses -- not independently re-measured for FP8 yet.
 constexpr std::int32_t kVoltaCutlassMinT = 33;
 
+// Every width below the CUTLASS crossover is one QPN split pass over the weights. The SIMT
+// family's small-T ceiling (4 for gate_up) is not a chunk size here: at the MTP4 verify width it
+// would leave a one-token remainder that re-reads the whole shard through the decode kernel.
+constexpr std::int32_t kVoltaQpnSplitMaxT = kVoltaCutlassMinT - 1;
+static_assert(kVoltaQpnSplitMaxT == kFp8VoltaQpnMaxTokens);
+
+template <class Geometry>
+inline constexpr bool kVoltaQpnSplitGeometry =
+    Geometry::kOutputRows % 2 == 0 && Geometry::kInputRows % 128 == 0 &&
+    Geometry::kInputRows / 128 >= 8;
+
 template <class Allocator>
 Tensor allocate_materialized_workspace(Allocator& allocator, std::int32_t rows, std::int32_t cols) {
     return allocator.alloc(DType::FP32, {rows, cols});
@@ -78,8 +90,9 @@ template <class Geometry>
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& workspace,
                 cudaStream_t stream) {
     constexpr std::int32_t kIntermediate = Geometry::kOutputRows / 2;
-    constexpr std::int32_t kChunk        = kFp8LinearSmallTMax<Geometry>;
 #ifdef NINFER_VOLTA_BUILD
+    static_assert(kVoltaQpnSplitGeometry<Geometry>);
+    constexpr std::int32_t kChunk = kVoltaQpnSplitMaxT;
     if (x.ne[1] >= kVoltaCutlassMinT) {
         auto scratch_scope = workspace.scope();
         Tensor gate_up = allocate_materialized_workspace(workspace, weight.n, x.ne[1]);
@@ -87,6 +100,8 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceAre
         swiglu_fp32_launch(gate_up, weight.scales, out, stream);
         return;
     }
+#else
+    constexpr std::int32_t kChunk = kFp8LinearSmallTMax<Geometry>;
 #endif
     for (std::int32_t token_begin = 0; token_begin < x.ne[1]; token_begin += kChunk) {
         const std::int32_t active = std::min(kChunk, x.ne[1] - token_begin);
@@ -102,8 +117,8 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceAre
             } else {
                 fp8_linear_swiglu_decode_launch_shard(input_chunk, weight, output_chunk, stream);
             }
+        } else {
 #ifdef NINFER_VOLTA_BUILD
-        } else if (fp8_linear_swiglu_qpn_split_supported(weight.n, weight.k, active)) {
             // Two independent QPN8 launches (one per weight half) into fp32 scratch, then a small
             // combine kernel -- not the fused single-kernel route (fp8_linear_swiglu_volta_qpn,
             // still built and correct, now unused in production) and not the unfused
@@ -117,13 +132,13 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceAre
             fp8_linear_swiglu_qpn_split_launch(input_chunk, weight, output_chunk,
                                                reinterpret_cast<float*>(scratch.gate.data),
                                                reinterpret_cast<float*>(scratch.up.data), stream);
-#endif
-        } else {
+#else
             if constexpr (std::is_same_v<Geometry, Fp8MlpGateUpGeometry>) {
                 fp8_linear_swiglu_small_t_launch(input_chunk, weight, output_chunk, stream);
             } else {
                 fp8_linear_swiglu_small_t_launch_shard(input_chunk, weight, output_chunk, stream);
             }
+#endif
         }
     }
 }
@@ -157,8 +172,8 @@ std::size_t capacity_bytes_impl(LinearPolicy policy, std::int32_t min_tokens,
     // interval's widest T; an interval straddling the threshold can reach either branch depending
     // on the actual call's T, so the capacity is the max of both, not either alone.
     if (interval_uses_a16 && max_tokens >= 2) {
-        std::size_t a16_need = qpn_split_workspace_bytes<Geometry>(
-            std::min(max_tokens, kFp8LinearSmallTMax<Geometry>));
+        std::size_t a16_need =
+            qpn_split_workspace_bytes<Geometry>(std::min(max_tokens, kVoltaQpnSplitMaxT));
         if (policy == LinearPolicy::A16Only && max_tokens >= kVoltaCutlassMinT) {
             a16_need = std::max(
                 a16_need, materialized_workspace_bytes(Geometry::kOutputRows, max_tokens) +
