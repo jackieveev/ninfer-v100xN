@@ -48,12 +48,11 @@ Fp8LinearAddRoute resolve_route(std::int32_t output_rows, std::int32_t input_row
     }
     if (policy == LinearPolicy::A16Only) {
 #ifdef NINFER_VOLTA_BUILD
-        // T==1 keeps the fused decode kernel; T>=2 takes linear()+residual_add() instead of the
-        // fused small_t kernel, exactly mirroring the NVFP4 linear_add fix -- linear() now reaches
-        // QPN8 (fp8_dispatch.cpp's launch_a16) and this op's fused kernel never did. Safe the same
-        // way NVFP4's was: the only new rounding step feeds a plain addition, not a nonlinearity,
-        // so it doesn't compound the way linear_swiglu's did.
-        return tokens == 1 ? Fp8LinearAddRoute::A16 : Fp8LinearAddRoute::LinearThenAdd;
+        // Every Volta width takes linear()+residual_add(). Production FP8 residual weights are
+        // load-time prepacked and have no SIMT decode consumer; linear()'s QPN covers T=1. The
+        // intermediate BF16 materialization feeds a plain addition, so it does not compound the
+        // way linear_swiglu's did.
+        return Fp8LinearAddRoute::LinearThenAdd;
 #else
         return Fp8LinearAddRoute::A16;
 #endif

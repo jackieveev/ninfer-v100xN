@@ -111,6 +111,33 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceAre
                        static_cast<std::int64_t>(token_begin) * kIntermediate * sizeof(std::uint16_t);
         Tensor input_chunk(input, DType::BF16, {weight.k, active});
         Tensor output_chunk(output, DType::BF16, {kIntermediate, active});
+#ifdef NINFER_VOLTA_BUILD
+        // Two independent QPN8 launches (one per weight half) into fp32 scratch, then a small
+        // combine kernel -- not the fused single-kernel route (fp8_linear_swiglu_volta_qpn,
+        // still built and correct, now unused in production) and not the unfused
+        // linear()+silu_mul() composition, which fails this op's correctness test the same
+        // way the NVFP4 sibling's did. Mirrors nvfp4_linear_swiglu_qpn_split.cuh exactly: the
+        // fused kernel's doubled accumulator/decode registers cost more than sharing the
+        // activation load saves. See the NVFP4 decode sweep.
+        //
+        // T=1 is included once the weight is load-time prepacked: the SIMT decode kernel cannot
+        // consume that layout, and QPN now admits the one-token tile for every production FP8 MLP.
+        if (fp8_linear_swiglu_qpn_split_supported(weight.n, weight.k, active)) {
+            auto scope = workspace.scope();
+            Tensor qpn_input = input_chunk;
+            if (fp8_volta_qpn_precast_supported(weight.n / 2, weight.k, active)) {
+                Tensor activation = workspace.alloc(DType::FP16, {weight.k, active});
+                fp8_volta_qpn_cast_activation(input_chunk, activation, stream);
+                qpn_input = activation;
+            }
+            Fp8QpnSplitWorkspace scratch =
+                allocate_qpn_split_workspace<Geometry>(workspace, active);
+            fp8_linear_swiglu_qpn_split_launch(qpn_input, weight, output_chunk,
+                                               reinterpret_cast<float*>(scratch.gate.data),
+                                               reinterpret_cast<float*>(scratch.up.data), stream);
+            continue;
+        }
+#endif
         if (active == 1) {
             if constexpr (std::is_same_v<Geometry, Fp8MlpGateUpGeometry>) {
                 fp8_linear_swiglu_decode_launch(input_chunk, weight, output_chunk, stream);
@@ -119,19 +146,7 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceAre
             }
         } else {
 #ifdef NINFER_VOLTA_BUILD
-            // Two independent QPN8 launches (one per weight half) into fp32 scratch, then a small
-            // combine kernel -- not the fused single-kernel route (fp8_linear_swiglu_volta_qpn,
-            // still built and correct, now unused in production) and not the unfused
-            // linear()+silu_mul() composition, which fails this op's correctness test the same
-            // way the NVFP4 sibling's did. Mirrors nvfp4_linear_swiglu_qpn_split.cuh exactly: the
-            // fused kernel's doubled accumulator/decode registers cost more than sharing the
-            // activation load saves. See the NVFP4 decode sweep.
-            auto scope                 = workspace.scope();
-            Fp8QpnSplitWorkspace scratch =
-                allocate_qpn_split_workspace<Geometry>(workspace, active);
-            fp8_linear_swiglu_qpn_split_launch(input_chunk, weight, output_chunk,
-                                               reinterpret_cast<float*>(scratch.gate.data),
-                                               reinterpret_cast<float*>(scratch.up.data), stream);
+            throw std::logic_error("fp8 Volta SwiGLU A16 width must take QPN or CUTLASS");
 #else
             if constexpr (std::is_same_v<Geometry, Fp8MlpGateUpGeometry>) {
                 fp8_linear_swiglu_small_t_launch(input_chunk, weight, output_chunk, stream);
@@ -171,9 +186,16 @@ std::size_t capacity_bytes_impl(LinearPolicy policy, std::int32_t min_tokens,
     // kVoltaCutlassMinT, launch_a16 instead takes the single-shot CUTLASS route sized to the
     // interval's widest T; an interval straddling the threshold can reach either branch depending
     // on the actual call's T, so the capacity is the max of both, not either alone.
-    if (interval_uses_a16 && max_tokens >= 2) {
-        std::size_t a16_need =
-            qpn_split_workspace_bytes<Geometry>(std::min(max_tokens, kVoltaQpnSplitMaxT));
+    if (interval_uses_a16 && max_tokens >= 1) {
+        const std::int32_t chunk = std::min(max_tokens, kVoltaQpnSplitMaxT);
+        // Precast is only spent at T=1..8; wider QPN chunks keep the split scratch alone so an
+        // exact T=32 capacity query matches the execution high-water.
+        std::size_t a16_need = qpn_split_workspace_bytes<Geometry>(chunk);
+        if (fp8_volta_qpn_precast_supported(Geometry::kOutputRows / 2, Geometry::kInputRows,
+                                            chunk)) {
+            a16_need += fp8_volta_qpn_precast_workspace_bytes(
+                Geometry::kOutputRows / 2, Geometry::kInputRows, chunk);
+        }
         if (policy == LinearPolicy::A16Only && max_tokens >= kVoltaCutlassMinT) {
             a16_need = std::max(
                 a16_need, materialized_workspace_bytes(Geometry::kOutputRows, max_tokens) +

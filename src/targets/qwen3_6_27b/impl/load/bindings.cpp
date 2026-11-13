@@ -221,6 +221,9 @@ DensePostMixerPayload load_mlp(const MlpPlan& plan,
         out.down.volta_fp32_scale = fast_decode;
         ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(out.gate_up);
         ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(out.down);
+    } else if (out.gate_up.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+        ::ninfer::ops::detail::fp8_prepack_qpn_sm70(out.gate_up);
+        ::ninfer::ops::detail::fp8_prepack_qpn_sm70(out.down);
     }
 #endif
     return out;
@@ -246,6 +249,8 @@ load_attention_projection(const FullAttentionPlan& plan,
     if (out.query_key_gate_value.qtype == QType::NVFP4) {
         out.query_key_gate_value.volta_fp32_scale = fast_decode;
         ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(out.query_key_gate_value);
+    } else if (out.query_key_gate_value.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+        ::ninfer::ops::detail::fp8_prepack_qpn_sm70(out.query_key_gate_value);
     }
 #endif
     return out;
@@ -271,6 +276,8 @@ load_gdn_input_projection(const GdnPlan& plan, const artifact::MaterializedArtif
     if (out.query_key_value_z.qtype == QType::NVFP4) {
         out.query_key_value_z.volta_fp32_scale = fast_decode;
         ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(out.query_key_value_z);
+    } else if (out.query_key_value_z.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+        ::ninfer::ops::detail::fp8_prepack_qpn_sm70(out.query_key_value_z);
     }
 #endif
     return out;
@@ -1227,6 +1234,8 @@ void LoadedModelData::build_device_view(const BindingPlan& plan, int device,
             if (target.output.qtype == QType::NVFP4) {
                 target.output.volta_fp32_scale = plan.features.volta_fast_decode;
                 ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(target.output);
+            } else if (target.output.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+                ::ninfer::ops::detail::fp8_prepack_qpn_sm70(target.output);
             }
 #endif
             target.post_attention_norm = artifact::materialized_tensor(
@@ -1256,6 +1265,8 @@ void LoadedModelData::build_device_view(const BindingPlan& plan, int device,
             if (target.output.qtype == QType::NVFP4) {
                 target.output.volta_fp32_scale = plan.features.volta_fast_decode;
                 ::ninfer::ops::detail::nvfp4_prepack_qpn_sm70(target.output);
+            } else if (target.output.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+                ::ninfer::ops::detail::fp8_prepack_qpn_sm70(target.output);
             }
 #endif
             target.post_attention_norm = artifact::materialized_tensor(

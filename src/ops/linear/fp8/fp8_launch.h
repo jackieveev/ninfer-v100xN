@@ -1,8 +1,12 @@
 #pragma once
 
+#include "core/arena.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
 
 namespace ninfer::ops::detail {
 
@@ -19,8 +23,15 @@ void launch_fp8_vocabulary_a16_mma(const Tensor& x, const Weight& weight, Tensor
 inline constexpr std::int32_t kFp8VoltaQpnRowsPerTile = 8;
 inline constexpr std::int32_t kFp8VoltaQpnMaxTokens   = 32;
 void launch_fp8_volta_qpn(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+void launch_fp8_volta_qpn_precast(const Tensor&, const Weight&, Tensor&, WorkspaceArena&,
+                                  cudaStream_t);
+void fp8_volta_qpn_cast_activation(const Tensor&, Tensor&, cudaStream_t);
 [[nodiscard]] bool fp8_volta_qpn_supported(std::int32_t n, std::int32_t k,
                                            std::int32_t t) noexcept;
+[[nodiscard]] bool fp8_volta_qpn_precast_supported(std::int32_t n, std::int32_t k,
+                                                   std::int32_t tokens) noexcept;
+[[nodiscard]] std::size_t fp8_volta_qpn_precast_workspace_bytes(std::int32_t n, std::int32_t k,
+                                                                std::int32_t max_tokens);
 #endif // NINFER_VOLTA_BUILD
 
 } // namespace ninfer::ops::detail

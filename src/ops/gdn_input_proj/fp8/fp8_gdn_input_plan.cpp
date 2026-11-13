@@ -45,8 +45,11 @@ std::size_t fp8_gdn_input_workspace_capacity_bytes(LinearPolicy policy, std::int
     if (max_tokens >= kVoltaCutlassMinT) {
         return fp8_gdn_input_cutlass_workspace_bytes(max_tokens);
     }
-#endif
+    return fp8_volta_qpn_precast_workspace_bytes(Fp8GdnInputGeometry::kOutputRows,
+                                                 Fp8GdnInputGeometry::kInputRows, max_tokens);
+#else
     return 0;
+#endif
 }
 
 void fp8_gdn_input_a16_dispatch(const Tensor& x, const Weight& weight, Tensor& qkv, Tensor& z,
@@ -82,7 +85,15 @@ void fp8_gdn_input_a16_dispatch(const Tensor& x, const Weight& weight, Tensor& q
         Tensor z_chunk(z_output, DType::BF16, {kZRows, active});
 #ifdef NINFER_VOLTA_BUILD
         if (fp8_volta_qpn_supported(weight.n, weight.k, active)) {
-            launch_fp8_gdn_input_volta_qpn(input_chunk, weight, qkv_chunk, z_chunk, stream);
+            if (workspace != nullptr &&
+                fp8_volta_qpn_precast_supported(weight.n, weight.k, active)) {
+                auto scope        = workspace->scope();
+                Tensor activation = workspace->alloc(DType::FP16, {weight.k, active});
+                fp8_volta_qpn_cast_activation(input_chunk, activation, stream);
+                launch_fp8_gdn_input_volta_qpn(activation, weight, qkv_chunk, z_chunk, stream);
+            } else {
+                launch_fp8_gdn_input_volta_qpn(input_chunk, weight, qkv_chunk, z_chunk, stream);
+            }
             continue;
         }
 #endif
@@ -125,8 +136,16 @@ void fp8_gdn_input_a16_dispatch_shard(const Tensor& x, const Weight& weight, Ten
         Tensor qkv_chunk(qkv_output, DType::BF16, {kQkvRows, active});
         Tensor z_chunk(z_output, DType::BF16, {kZRows, active});
 #ifdef NINFER_VOLTA_BUILD
-        if (active > 1 && fp8_volta_qpn_supported(weight.n, weight.k, active)) {
-            launch_fp8_gdn_input_volta_qpn_shard(input_chunk, weight, qkv_chunk, z_chunk, stream);
+        if (fp8_volta_qpn_supported(weight.n, weight.k, active)) {
+            if (workspace != nullptr &&
+                fp8_volta_qpn_precast_supported(weight.n, weight.k, active)) {
+                auto scope        = workspace->scope();
+                Tensor activation = workspace->alloc(DType::FP16, {weight.k, active});
+                fp8_volta_qpn_cast_activation(input_chunk, activation, stream);
+                launch_fp8_gdn_input_volta_qpn_shard(activation, weight, qkv_chunk, z_chunk, stream);
+            } else {
+                launch_fp8_gdn_input_volta_qpn_shard(input_chunk, weight, qkv_chunk, z_chunk, stream);
+            }
             continue;
         }
 #endif

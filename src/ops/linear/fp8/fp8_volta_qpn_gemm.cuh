@@ -42,14 +42,17 @@
 // exact for every finite E4M3 value including all 14 denormals, with only the two NaN encodings
 // mapping to +-480, which weights never contain.
 
+#include "core/arena.h"
 #include "core/device.h"
 #include "ops/common/volta_mma.cuh"
+#include "ops/linear/fp8/fp8_launch.h"
 #include "ops/linear/fp8/fp8_output.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 
@@ -85,14 +88,16 @@ __device__ __forceinline__ void fp8_decode_quad(std::uint32_t word, half2& lo, h
 // nvfp4_volta_qpn_gemm.cuh, which got them first; this is the same pattern applied to the
 // simpler single-projection kernel. The shared reduce buffer is SPLITK * kTiles * 256 floats, so
 // SPLITK=16 at kTiles=4 is never instantiated (64 KB, over Volta's 48 KB static limit).
+// `Activation` is BF16 (convert in the inner loop) or a load-time FP16 image. `Streaming` uses
+// __ldcs on the weight stream -- the NVFP4 prepacked sibling's measured winner on layer shapes.
 template <int kTiles, int SPLITK, int NACC, bool Prepacked, class OutputPolicy,
-          bool BlockScaled = false>
+          class Activation = __nv_bfloat16, bool Streaming = false, bool BlockScaled = false>
 __global__ __launch_bounds__(
     SPLITK * 32, (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK < 1
         ? 1
         : (kTiles == 1 ? 32 : kTiles == 2 ? 16 : 4) / SPLITK) void fp8_volta_qpn_gemm_kernel(
     const std::uint8_t* __restrict__ codes, const __nv_bfloat16* __restrict__ scales,
-    const __nv_bfloat16* __restrict__ x, int n, int k, int t, OutputPolicy output) {
+    const Activation* __restrict__ x, int n, int k, int t, OutputPolicy output) {
     using S = Fp8VoltaQpnSchedule;
 
     __shared__ float cs[SPLITK][kTiles * S::kRowsPerTile * S::kColsPerCta];
@@ -144,12 +149,14 @@ __global__ __launch_bounds__(
                 const std::int64_t index =
                     (((static_cast<std::int64_t>(blockIdx.x) * blocks + b) * 8 + e) * 32) +
                     lane;
-                cw[e] = __ldg(reinterpret_cast<const uint4*>(codes) + index);
+                const auto* pointer = reinterpret_cast<const uint4*>(codes) + index;
+                cw[e] = Streaming ? __ldcs(pointer) : __ldg(pointer);
             } else {
                 // One 128-byte line per lane per iteration: 128 adjacent k, eight uint4 loads.
                 const std::uint8_t* p =
                     crow + static_cast<std::int64_t>(b) * S::kKPerBlock;
-                cw[e] = __ldg(reinterpret_cast<const uint4*>(p + 16 * e));
+                const auto* pointer = reinterpret_cast<const uint4*>(p + 16 * e);
+                cw[e] = Streaming ? __ldcs(pointer) : __ldg(pointer);
             }
         }
 
@@ -174,17 +181,24 @@ __global__ __launch_bounds__(
                     const int row = tile * S::kRowsPerTile + r;
                     half2 a[4];
                     if (row < t) {
-                        const __nv_bfloat16* xrow = x + static_cast<std::int64_t>(row) * k + kbase;
-                        const uint4 raw           = *reinterpret_cast<const uint4*>(xrow);
-                        const auto* src           = reinterpret_cast<const __nv_bfloat16*>(&raw);
-                        __half tmp[8];
+                        const Activation* xrow = x + static_cast<std::int64_t>(row) * k + kbase;
+                        const uint4 raw        = *reinterpret_cast<const uint4*>(xrow);
+                        const auto* src        = reinterpret_cast<const Activation*>(&raw);
+                        if constexpr (std::is_same_v<Activation, half>) {
 #pragma unroll
-                        for (int j = 0; j < 8; ++j) {
-                            tmp[j] = __float2half(__bfloat162float(src[j]));
-                        }
+                            for (int j = 0; j < 4; ++j) {
+                                a[j] = *reinterpret_cast<const half2*>(src + 2 * j);
+                            }
+                        } else {
+                            __half tmp[8];
 #pragma unroll
-                        for (int j = 0; j < 4; ++j) {
-                            a[j] = *reinterpret_cast<const half2*>(tmp + 2 * j);
+                            for (int j = 0; j < 8; ++j) {
+                                tmp[j] = __float2half(__bfloat162float(src[j]));
+                            }
+#pragma unroll
+                            for (int j = 0; j < 4; ++j) {
+                                a[j] = *reinterpret_cast<const half2*>(tmp + 2 * j);
+                            }
                         }
                     } else {
 #pragma unroll
@@ -242,9 +256,9 @@ __global__ __launch_bounds__(
 // Shared launcher. Every FP8 consumer -- plain Linear, the attention projections, the GDN input
 // projection -- differs only in where the epilogue puts its results, so they share one kernel and
 // supply their own output policy.
-template <class OutputPolicy, bool BlockScaled = false>
-void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPolicy output,
-                                      std::int32_t n, cudaStream_t stream) {
+template <class Activation, class OutputPolicy, bool BlockScaled = false>
+void launch_fp8_volta_qpn_with_activation(const Tensor& x, const Weight& w, const Activation* xd,
+                                          OutputPolicy output, std::int32_t n, cudaStream_t stream) {
     using S              = Fp8VoltaQpnSchedule;
     const std::int32_t k = x.ne[0];
     const std::int32_t t = x.ne[1];
@@ -252,7 +266,7 @@ void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPo
     const dim3 grid(static_cast<unsigned>((n + S::kColsPerCta - 1) / S::kColsPerCta));
     const auto* codes  = static_cast<const std::uint8_t*>(w.qdata);
     const auto* scales = static_cast<const __nv_bfloat16*>(w.scales);
-    const auto* xd     = static_cast<const __nv_bfloat16*>(x.data);
+    const bool prepacked  = w.layout == QuantLayout::VoltaQpnPrepacked;
     const bool vocabulary = (n == 248320 || n == 124160 || n == 62080) && k == 5120;
     // Generation-2 winners from a private sweep (bench/ops/fp8_qpn8_splitk_sweep.cu, deleted):
     // SPLITK8 NACC1 wins at every kTiles on attn input, GDN input, and the 17408-K residual shape
@@ -261,16 +275,28 @@ void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPo
     // the 5120/17408-K shapes, where k/128=40/136 aren't even divisible by 16. NACC=2 loses
     // everywhere, matching the NVFP4 SwiGLU kernel's finding: extra accumulator chains just cost
     // registers on a kernel that is already issue/DRAM-bound, not dependency-bound.
+    //
+    // Streaming loads match the NVFP4 prepacked sibling on every non-vocabulary layer shape;
+    // the vocabulary head already saturates the bus with __ldg and is left alone.
     const bool wide_k_headroom = k == 6144;
-#define NINFER_FP8_QPN_LAUNCH(TILES, SPLITK, NACC)                                      \
-    do {                                                                                 \
-        if (w.layout == QuantLayout::VoltaQpnPrepacked) {                                \
-            fp8_volta_qpn_gemm_kernel<TILES, SPLITK, NACC, true, OutputPolicy, BlockScaled> \
-                <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, xd, n, k, t, output); \
-        } else {                                                                         \
-            fp8_volta_qpn_gemm_kernel<TILES, SPLITK, NACC, false, OutputPolicy, BlockScaled> \
-                <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, xd, n, k, t, output); \
-        }                                                                                \
+    const bool stream_weights  = prepacked && !vocabulary;
+#define NINFER_FP8_QPN_LAUNCH(TILES, SPLITK, NACC)                                                 \
+    do {                                                                                            \
+        if (prepacked) {                                                                            \
+            if (stream_weights) {                                                                   \
+                fp8_volta_qpn_gemm_kernel<TILES, SPLITK, NACC, true, OutputPolicy, Activation, true,\
+                                          BlockScaled>                                              \
+                    <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);         \
+            } else {                                                                                \
+                fp8_volta_qpn_gemm_kernel<TILES, SPLITK, NACC, true, OutputPolicy, Activation,      \
+                                          false, BlockScaled>                                       \
+                    <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);         \
+            }                                                                                       \
+        } else {                                                                                    \
+            fp8_volta_qpn_gemm_kernel<TILES, SPLITK, NACC, false, OutputPolicy, Activation, false,   \
+                                      BlockScaled>                                                  \
+                <<<grid, SPLITK * 32, 0, stream>>>(codes, scales, xd, n, k, t, output);             \
+        }                                                                                           \
     } while (false)
     if (t <= S::kRowsPerTile) {
         if (vocabulary) {
@@ -287,6 +313,34 @@ void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPo
     }
 #undef NINFER_FP8_QPN_LAUNCH
     CUDA_CHECK(cudaGetLastError());
+}
+
+template <class OutputPolicy, bool BlockScaled = false>
+void launch_fp8_volta_qpn_with_output(const Tensor& x, const Weight& w, OutputPolicy output,
+                                      std::int32_t n, cudaStream_t stream) {
+    if (x.dtype == DType::FP16) {
+        launch_fp8_volta_qpn_with_activation<half, OutputPolicy, BlockScaled>(
+            x, w, static_cast<const half*>(x.data), output, n, stream);
+        return;
+    }
+    launch_fp8_volta_qpn_with_activation<__nv_bfloat16, OutputPolicy, BlockScaled>(
+        x, w, static_cast<const __nv_bfloat16*>(x.data), output, n, stream);
+}
+
+template <class OutputPolicy, bool BlockScaled = false>
+void launch_fp8_volta_qpn_with_precast_output(const Tensor& x, const Weight& w,
+                                              OutputPolicy output, std::int32_t n,
+                                              WorkspaceArena& workspace, cudaStream_t stream) {
+    if (x.dtype == DType::FP16) {
+        launch_fp8_volta_qpn_with_activation<half, OutputPolicy, BlockScaled>(
+            x, w, static_cast<const half*>(x.data), output, n, stream);
+        return;
+    }
+    auto scope            = workspace.scope();
+    Tensor activation     = workspace.alloc(DType::FP16, {x.ne[0], x.ne[1]});
+    fp8_volta_qpn_cast_activation(x, activation, stream);
+    launch_fp8_volta_qpn_with_activation<half, OutputPolicy, BlockScaled>(
+        x, w, static_cast<const half*>(activation.data), output, n, stream);
 }
 
 #endif // sm_70

@@ -134,7 +134,14 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& out,
         // first generated token and a one-token tail after a full QPN chunk.
         if (fp8_volta_qpn_supported(weight.n, weight.k, active) ||
             (active == 1 && weight.layout == QuantLayout::VoltaQpnPrepacked)) {
-            launch_fp8_volta_qpn(input_chunk, weight, output_chunk, stream);
+            if (workspace != nullptr &&
+                fp8_volta_qpn_precast_supported(weight.n, weight.k, active)) {
+                auto scope = workspace->scope();
+                launch_fp8_volta_qpn_precast(input_chunk, weight, output_chunk, *workspace,
+                                             stream);
+            } else {
+                launch_fp8_volta_qpn(input_chunk, weight, output_chunk, stream);
+            }
             continue;
         }
 #endif
@@ -202,10 +209,15 @@ std::size_t fp8_linear_workspace_capacity_bytes(std::int32_t output_rows, std::i
         !is_fp8_vocabulary_problem(problem)) {
         return fp8_cutlass_sm70_workspace_bytes(output_rows, input_rows, max_tokens);
     }
-#endif
+    return std::max(fp8_volta_qpn_precast_workspace_bytes(output_rows, input_rows, max_tokens),
+                    interval_uses_a8(problem, policy, min_tokens, max_tokens)
+                        ? fp8_a8_workspace_capacity_bytes(max_tokens, input_rows)
+                        : 0);
+#else
     return interval_uses_a8(problem, policy, min_tokens, max_tokens)
                ? fp8_a8_workspace_capacity_bytes(max_tokens, input_rows)
                : 0;
+#endif
 }
 
 void fp8_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
